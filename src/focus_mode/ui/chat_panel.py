@@ -36,6 +36,13 @@ SUGGESTIONS = [
 
 class ChatInput(QPlainTextEdit):
     submitted = Signal()
+    width_changed = Signal()
+
+    def resizeEvent(self, e) -> None:
+        super().resizeEvent(e)
+        # Wrapping depends on the viewport width, not just the number of paragraphs.
+        if e.oldSize().width() != e.size().width():
+            self.width_changed.emit()
 
     def keyPressEvent(self, e) -> None:
         if e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and not (e.modifiers() & Qt.KeyboardModifier.ShiftModifier):
@@ -197,6 +204,7 @@ class ChatPanel(QWidget):
         self.input.setMaximumHeight(82)
         self.input.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.input.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self.input.setSizePolicy(self.input.sizePolicy().horizontalPolicy(), self.input.sizePolicy().verticalPolicy())
         self.send_btn = QPushButton()
         self.send_btn.setProperty("variant", "primary")
         self.send_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -209,7 +217,8 @@ class ChatPanel(QWidget):
 
         self.send_btn.clicked.connect(self._on_send_clicked)
         self.input.submitted.connect(self._on_send_clicked)
-        self.input.textChanged.connect(self._grow_input)
+        self.input.textChanged.connect(self._schedule_grow_input)
+        self.input.width_changed.connect(self._schedule_grow_input)
         self.clear_btn.clicked.connect(self._clear)
         self.close_btn.clicked.connect(self.collapse_requested)
         agent.reply.connect(self._on_reply)
@@ -349,13 +358,32 @@ class ChatPanel(QWidget):
                 item.widget().deleteLater()
         self._refresh_state()
 
+    def _schedule_grow_input(self, *_args) -> None:
+        # Run after Qt has completed the current text/resize layout pass. This avoids
+        # measuring the old viewport width while the frameless window is being resized.
+        QTimer.singleShot(0, self._grow_input)
+
     def _grow_input(self) -> None:
-        # Keep the composer compact for one-line messages and grow only as text wraps.
-        # A modest cap prevents the input from dominating the chat panel.
-        doc_height = self.input.document().documentLayout().documentSize().height()
-        margins = self.input.contentsMargins()
-        target = round(doc_height + margins.top() + margins.bottom() + 12)
-        self.input.setFixedHeight(max(46, min(82, target)))
+        if not hasattr(self, "input"):
+            return
+        edit = self.input
+        doc = edit.document()
+        layout = doc.documentLayout()
+        # Force the document layout to reflect the current editor width before measuring.
+        # QTextDocument height then includes soft-wrapped lines, not only newline blocks.
+        viewport_width = max(1, edit.viewport().width())
+        doc.setTextWidth(viewport_width)
+        doc_height = layout.documentSize().height()
+        frame = edit.frameWidth() * 2
+        margins = edit.contentsMargins()
+        padding = 16  # QPlainTextEdit stylesheet has 8px vertical padding on each side.
+        target = int(round(doc_height + frame + margins.top() + margins.bottom() + padding))
+        target = max(46, min(82, target))
+        if edit.height() != target:
+            # Preserve cursor and text; changing only the widget height must not reset either.
+            cursor = edit.textCursor()
+            edit.setFixedHeight(target)
+            edit.setTextCursor(cursor)
 
     # -- open / close -------------------------------------------------------------------
     def is_animating(self) -> bool:
