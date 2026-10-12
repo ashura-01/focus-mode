@@ -1,12 +1,8 @@
-# Focus Mode
+Focus Mode
 
 A dark, distraction-fighting focus timer for Linux, with a knight guardian who tells you to put the phone down.
 Built with PySide6 (Qt). Data in SQLite, settings in TOML.
-
-![Timer](screenshots/timer.png)
-![Tasks](screenshots/tasks.png)
-![Stats](screenshots/stats.png)
-
+<p align="center"> <img src="screenshots/timer.png" alt="Timer page" width="30%"> <img src="screenshots/tasks.png" alt="Tasks page" width="30%"> <img src="screenshots/stats.png" alt="Stats page" width="30%"> </p><p align="center"> <sub><b>Timer</b> &nbsp;·&nbsp; <b>Tasks</b> &nbsp;·&nbsp; <b>Stats</b></sub> </p>
 ## Install
 
 Python 3.11+ (tested on 3.13; 3.14 works with a PySide6 wheel that supports it).
