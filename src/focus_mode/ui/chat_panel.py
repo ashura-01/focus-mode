@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QDesktopServices, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 
 from focus_mode.agent import Agent
 from focus_mode.services import Services
+from focus_mode import paths
 from focus_mode.ui import icons
 from focus_mode.ui.theme import theme
 from focus_mode.ui.widgets import IconLabel, button, label
@@ -41,6 +42,37 @@ class ChatInput(QPlainTextEdit):
             self.submitted.emit()
             return
         super().keyPressEvent(e)
+
+
+class KnightAvatar(QLabel):
+    """Small circular crop of the knight portrait used beside assistant messages."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._source = QPixmap(str(paths.asset("knight.png")))
+        self.setFixedSize(30, 30)
+        self.setToolTip("Knight AI")
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        circle = QPainterPath()
+        circle.addEllipse(0.5, 0.5, self.width() - 1, self.height() - 1)
+        painter.setClipPath(circle)
+        painter.fillPath(circle, theme.c("panel2"))
+        if not self._source.isNull():
+            # Use the upper portrait area so the circular icon reads as a helmet/head.
+            source = self._source.copy(0, 0, self._source.width(), max(1, int(self._source.height() * 0.42)))
+            pix = source.scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                                Qt.TransformationMode.SmoothTransformation)
+            x = (pix.width() - self.width()) // 2
+            y = max(0, (pix.height() - self.height()) // 5)
+            painter.drawPixmap(0, 0, pix, x, y, self.width(), self.height())
+        painter.setClipping(False)
+        painter.setPen(theme.c("border"))
+        painter.drawEllipse(0.5, 0.5, self.width() - 1, self.height() - 1)
 
 
 class Bubble(QFrame):
@@ -161,7 +193,10 @@ class ChatPanel(QWidget):
         row.setSpacing(8)
         self.input = ChatInput()
         self.input.setPlaceholderText("Ask or tell me to do something…")
-        self.input.setFixedHeight(46)
+        self.input.setMinimumHeight(46)
+        self.input.setMaximumHeight(82)
+        self.input.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.input.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
         self.send_btn = QPushButton()
         self.send_btn.setProperty("variant", "primary")
         self.send_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -234,7 +269,19 @@ class ChatPanel(QWidget):
             QTimer.singleShot(0, self._to_bottom)
 
     def _add_bubble(self, role: str, text: str) -> None:
-        self._push(Bubble(role, text), Qt.AlignmentFlag.AlignRight if role == "user" else Qt.AlignmentFlag.AlignLeft)
+        bubble = Bubble(role, text)
+        if role == "assistant":
+            line = QWidget()
+            row = QHBoxLayout(line)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(7)
+            row.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+            row.addWidget(KnightAvatar(), 0, Qt.AlignmentFlag.AlignTop)
+            row.addWidget(bubble, 0, Qt.AlignmentFlag.AlignTop)
+            row.addStretch(1)
+            self._push(line, Qt.AlignmentFlag.AlignLeft)
+        else:
+            self._push(bubble, Qt.AlignmentFlag.AlignRight)
 
     def _add_step(self, text: str) -> None:
         lab = label("›  " + text, "small")
@@ -303,8 +350,12 @@ class ChatPanel(QWidget):
         self._refresh_state()
 
     def _grow_input(self) -> None:
-        lines = max(1, min(5, self.input.document().blockCount()))
-        self.input.setFixedHeight(46 + (lines - 1) * 20)
+        # Keep the composer compact for one-line messages and grow only as text wraps.
+        # A modest cap prevents the input from dominating the chat panel.
+        doc_height = self.input.document().documentLayout().documentSize().height()
+        margins = self.input.contentsMargins()
+        target = round(doc_height + margins.top() + margins.bottom() + 12)
+        self.input.setFixedHeight(max(46, min(82, target)))
 
     # -- open / close -------------------------------------------------------------------
     def is_animating(self) -> bool:
