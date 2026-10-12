@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import time
 
-from PySide6.QtCore import QEvent, QRectF, QSize, Qt, QTimer
+from PySide6.QtCore import QEvent, QRectF, Qt, QTimer
 from PySide6.QtGui import QGuiApplication, QIcon, QKeySequence, QPainter, QShortcut
 from PySide6.QtWidgets import (
     QAbstractButton,
     QMessageBox,
-    QPushButton,
     QButtonGroup,
     QFrame,
     QHBoxLayout,
@@ -71,52 +70,20 @@ class NavButton(QAbstractButton):
         p.drawPixmap(13, 13, icons.pixmap(self.icon_name, color, 26))
 
 
-class EdgeGrip(QWidget):
-    """Invisible strip on one window edge/corner. It owns its own resize cursor, so the cursor
-    never leaks onto the page or the AI chat (child widgets inherit a cursor set on the window)."""
-
-    _CURSORS = {
-        Qt.Edge.LeftEdge: Qt.CursorShape.SizeHorCursor,
-        Qt.Edge.RightEdge: Qt.CursorShape.SizeHorCursor,
-        Qt.Edge.TopEdge: Qt.CursorShape.SizeVerCursor,
-        Qt.Edge.BottomEdge: Qt.CursorShape.SizeVerCursor,
-        Qt.Edge.LeftEdge | Qt.Edge.TopEdge: Qt.CursorShape.SizeFDiagCursor,
-        Qt.Edge.RightEdge | Qt.Edge.BottomEdge: Qt.CursorShape.SizeFDiagCursor,
-        Qt.Edge.RightEdge | Qt.Edge.TopEdge: Qt.CursorShape.SizeBDiagCursor,
-        Qt.Edge.LeftEdge | Qt.Edge.BottomEdge: Qt.CursorShape.SizeBDiagCursor,
-    }
-
-    def __init__(self, edges: Qt.Edge, parent: QWidget) -> None:
-        super().__init__(parent)
-        self.edges = edges
-        self.setCursor(self._CURSORS[edges])
-
-    def mousePressEvent(self, e) -> None:
-        handle = self.window().windowHandle()
-        if e.button() == Qt.MouseButton.LeftButton and handle is not None:
-            handle.startSystemResize(self.edges)
-            e.accept()
-            return
-        super().mousePressEvent(e)
-
-
 class MainWindow(QMainWindow):
     SIDEBAR_W = 78
     STACK_MIN_W = 490  # the page area never gets narrower than this (widest page needs ~471), so it can't slide under the chat
     # smallest window: sidebar + page area + outer margins (10 + 2*EDGE); wider while the AI chat panel is open
     BASE_MIN = (SIDEBAR_W + STACK_MIN_W + 10 + 12, 440)
     START_SIZE = (1000, 983)  # opening size, with the AI chat panel open
-    EDGE = 6  # px strip around the window that grabs the mouse for resizing
-    CORNER = 14  # px square at each corner that grabs the mouse for diagonal resizing
 
     def __init__(self, svc: Services) -> None:
         super().__init__()
         self.svc = svc
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(QIcon(str(paths.asset("icon.png"))))
-        # Plain window: no system title bar. We move/resize it ourselves (see mouse handlers).
-        self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
-        self.setContentsMargins(self.EDGE, self.EDGE, self.EDGE, self.EDGE)
+        # Use the native window frame/title bar. The window manager owns move, resize,
+        # minimize, maximize, and close operations; custom resize grips caused instability.
         self.setMinimumSize(*self.BASE_MIN)
         avail = QGuiApplication.primaryScreen().availableGeometry()
         self.resize(min(self.START_SIZE[0], avail.width()), min(self.START_SIZE[1], avail.height()))
@@ -183,25 +150,8 @@ class MainWindow(QMainWindow):
         self.chat.set_open(True, animate=False)
         self.chat_btn.setChecked(True)
 
-        # single close button, top-right corner (the window has no title bar)
-        self.close_btn = QPushButton(central)
-        self.close_btn.setObjectName("CloseBtn")
-        self.close_btn.setToolTip("Close  (Ctrl+Q)")
-        self.close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.close_btn.setFixedSize(30, 30)
-        self.close_btn.setIconSize(QSize(14, 14))
-        self.close_btn.clicked.connect(self.close)
-        self._style_close()
-        theme.changed.connect(self._style_close)
-
         self.toast = Toast(central)
         svc.toast.connect(self.toast.show_message)
-
-        # Resize handles (edges first, corners on top of them).
-        E = Qt.Edge
-        self._grips = [EdgeGrip(e, self) for e in (E.LeftEdge, E.RightEdge, E.TopEdge, E.BottomEdge,
-                                                   E.LeftEdge | E.TopEdge, E.RightEdge | E.TopEdge,
-                                                   E.LeftEdge | E.BottomEdge, E.RightEdge | E.BottomEdge)]
 
         # Heavy responsive work (header scaling, page margins) is throttled while the window is dragged.
         self._headers = self.findChildren(AvatarHeader)
@@ -219,14 +169,6 @@ class MainWindow(QMainWindow):
         svc.watch.tick.connect(self._sync_mini)
         svc.pomo.tick.connect(self._sync_title)
         svc.pomo.state_changed.connect(self._sync_title)
-
-    def _style_close(self) -> None:
-        self.close_btn.setIcon(icons.icon("close", theme.c("muted"), 14))
-        self.close_btn.setStyleSheet(
-            "#CloseBtn{border:0;background:transparent;border-radius:15px;padding:0}"
-            "#CloseBtn:hover{background:rgba(255,107,112,0.85)}"
-        )
-        self.close_btn.raise_()
 
     # -- navigation ---------------------------------------------------------
     @staticmethod
@@ -333,51 +275,19 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self._sync_mini)
         return super().event(e)
 
-    # -- frameless window: drag empty background to move, edge grips to resize ------------
-    def _place_grips(self) -> None:
-        w, h, e, c = self.width(), self.height(), self.EDGE, self.CORNER
-        geo = {
-            Qt.Edge.LeftEdge: (0, c, e, h - 2 * c),
-            Qt.Edge.RightEdge: (w - e, c, e, h - 2 * c),
-            Qt.Edge.TopEdge: (c, 0, w - 2 * c, e),
-            Qt.Edge.BottomEdge: (c, h - e, w - 2 * c, e),
-            Qt.Edge.LeftEdge | Qt.Edge.TopEdge: (0, 0, c, c),
-            Qt.Edge.RightEdge | Qt.Edge.TopEdge: (w - c, 0, c, c),
-            Qt.Edge.LeftEdge | Qt.Edge.BottomEdge: (0, h - c, c, c),
-            Qt.Edge.RightEdge | Qt.Edge.BottomEdge: (w - c, h - c, c, c),
-        }
-        locked = self.isMaximized() or self.isFullScreen()
-        for grip in self._grips:
-            grip.setGeometry(*geo[grip.edges])
-            grip.setVisible(not locked)
-            grip.raise_()
-
-    def mousePressEvent(self, e) -> None:
-        # Presses on buttons/inputs never get here; only empty background does.
-        handle = self.windowHandle()
-        if e.button() == Qt.MouseButton.LeftButton and handle is not None and not self.isFullScreen():
-            handle.startSystemMove()
-            e.accept()
-            return
-        super().mousePressEvent(e)
-
-    def mouseDoubleClickEvent(self, e) -> None:
-        if e.button() == Qt.MouseButton.LeftButton:
-            self.showNormal() if self.isMaximized() else self.showMaximized()
-            e.accept()
-            return
-        super().mouseDoubleClickEvent(e)
-
+    # Native window decorations handle resizing and title-bar actions.
     def resizeEvent(self, e) -> None:
         super().resizeEvent(e)
-        # Cheap, must-be-immediate work only. Everything that re-lays-out pages is throttled.
         self._last_resize = time.monotonic()
         self.toast.reposition()
-        self.close_btn.move(self.centralWidget().width() - self.close_btn.width() - 8, 6)
-        self.close_btn.raise_()
-        self._place_grips()
         if not self._responsive_timer.isActive():
             self._responsive_timer.start()
+
+    def changeEvent(self, e) -> None:
+        super().changeEvent(e)
+        if e.type() == QEvent.Type.WindowStateChange:
+            if not self._responsive_timer.isActive():
+                self._responsive_timer.start()
 
     def _apply_responsive(self) -> None:
         # Shrink the knight header on short windows so the timer isn't pushed off-screen.
@@ -392,11 +302,6 @@ class MainWindow(QMainWindow):
                 lay = page.layout()
                 if lay is not None:
                     lay.setContentsMargins(side, 16, side, 16)
-
-    def changeEvent(self, e) -> None:
-        super().changeEvent(e)
-        if e.type() == QEvent.Type.WindowStateChange:
-            self._place_grips()
 
     def closeEvent(self, e) -> None:
         self.mini.hide()
