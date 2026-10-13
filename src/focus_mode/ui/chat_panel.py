@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QPainter, QPainterPath, QPixmap
+from PySide6.QtGui import QDesktopServices, QPainter, QPainterPath, QPixmap, QTextDocument
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -25,6 +25,7 @@ from focus_mode.ui.theme import theme
 from focus_mode.ui.widgets import IconLabel, button, label
 
 WIDTH = 380
+INPUT_MIN, INPUT_MAX = 46, 150
 GUTTER_LEFT, GUTTER_RIGHT = 10, 16
 SUGGESTIONS = [
     "Show how my week went",
@@ -200,8 +201,7 @@ class ChatPanel(QWidget):
         row.setSpacing(8)
         self.input = ChatInput()
         self.input.setPlaceholderText("Ask or tell me to do something…")
-        self.input.setMinimumHeight(46)
-        self.input.setMaximumHeight(82)
+        self.input.setFixedHeight(INPUT_MIN)
         self.input.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.input.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
         self.input.setSizePolicy(self.input.sizePolicy().horizontalPolicy(), self.input.sizePolicy().verticalPolicy())
@@ -367,23 +367,20 @@ class ChatPanel(QWidget):
         if not hasattr(self, "input"):
             return
         edit = self.input
-        doc = edit.document()
-        layout = doc.documentLayout()
-        # Force the document layout to reflect the current editor width before measuring.
-        # QTextDocument height then includes soft-wrapped lines, not only newline blocks.
-        viewport_width = max(1, edit.viewport().width())
-        doc.setTextWidth(viewport_width)
-        doc_height = layout.documentSize().height()
-        frame = edit.frameWidth() * 2
-        margins = edit.contentsMargins()
-        padding = 16  # QPlainTextEdit stylesheet has 8px vertical padding on each side.
-        target = int(round(doc_height + frame + margins.top() + margins.bottom() + padding))
-        target = max(46, min(82, target))
+        # QPlainTextEdit's own document layout reports its height in *lines*, not pixels, so
+        # measure the wrapped text with a throw-away rich-text document of the same width/font.
+        probe = QTextDocument()
+        probe.setDefaultFont(edit.font())
+        probe.setDocumentMargin(edit.document().documentMargin())
+        probe.setDefaultTextOption(edit.document().defaultTextOption())
+        probe.setTextWidth(max(1, edit.viewport().width()))
+        probe.setPlainText(edit.toPlainText() or " ")
+        chrome = max(0, edit.height() - edit.viewport().height())  # border + padding
+        target = int(round(probe.size().height())) + chrome
+        target = max(INPUT_MIN, min(INPUT_MAX, target))
         if edit.height() != target:
-            # Preserve cursor and text; changing only the widget height must not reset either.
-            cursor = edit.textCursor()
             edit.setFixedHeight(target)
-            edit.setTextCursor(cursor)
+        edit.ensureCursorVisible()
 
     # -- open / close -------------------------------------------------------------------
     def is_animating(self) -> bool:

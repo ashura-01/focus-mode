@@ -40,9 +40,6 @@ class TimerPage(QWidget):
         middle.addWidget(self.meter)
         root.addLayout(middle, 1)
 
-        self.task_label = label("", "accent")
-        self.task_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        root.addWidget(self.task_label)
         self.note_box = NoteBox(svc)
         root.addWidget(self.note_box)
 
@@ -108,6 +105,4 @@ class TimerPage(QWidget):
         self.stats.set_values(fmt.hm(s["seconds"]), str(s["sessions"]), str(s["streak"]))
 
     def refresh_task(self) -> None:
-        task = self.svc.db.get_task(self.svc.active_task_id) if self.svc.active_task_id else None
-        self.task_label.setText(f"Working on: {task.title}" if task else "")
-        self.task_label.setVisible(task is not None)
+        pass  # the "Working on" text now lives in the session note box

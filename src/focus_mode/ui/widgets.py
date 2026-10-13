@@ -459,22 +459,59 @@ def rounded_path(rect: QRectF, radius: float) -> QPainterPath:
 
 
 class NoteBox(QLineEdit):
-    """One-line note for the session in progress; saved with it when it is logged."""
+    """One-line note for the session in progress; saved with it when it is logged.
+
+    Text you type looks normal. Text put there for you (the task you are working on, or a
+    note the AI set) is shown in the accent colour; typing over it replaces it.
+    """
+
+    PLACEHOLDER = "Session note — what are you working on? (saved with this session)"
 
     def __init__(self, svc, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.svc = svc
-        self.setPlaceholderText("Session note — what are you working on? (saved with this session)")
+        self._typed = ""  # the last note the person typed themselves
+        self._auto = False  # showing "Working on: …" (never saved as a note)
+        self.setPlaceholderText(self.PLACEHOLDER)
         self.setMaxLength(300)
         self.setClearButtonEnabled(True)
-        self.setText(svc.session_note)
-        self.textEdited.connect(self._push)
-        svc.session_note_cleared.connect(self._pull)
-        svc.pending_note_changed.connect(self._pull)
+        self.textEdited.connect(self._edited)
+        self.editingFinished.connect(self._sync)
+        svc.session_note_cleared.connect(self._sync)
+        svc.pending_note_changed.connect(self._sync)
+        svc.active_task_changed.connect(self._sync)
+        svc.tasks_changed.connect(self._sync)
+        theme.changed.connect(self._style)
+        self._sync()
 
-    def _push(self, text: str) -> None:
-        self.svc.session_note = text.strip()
+    def _style(self) -> None:
+        coloured = bool(self.text()) and (self._auto or self.svc.session_note != self._typed)
+        self.setStyleSheet(f"color: {theme.c('accent').name()};" if coloured else "")
 
-    def _pull(self) -> None:
-        if self.text().strip() != self.svc.session_note:
-            self.setText(self.svc.session_note)
+    def _edited(self, text: str) -> None:
+        self._auto = False
+        self._typed = self.svc.session_note = text.strip()
+        self._style()
+
+    def _task_text(self) -> str:
+        sv = self.svc
+        task = sv.db.get_task(sv.active_task_id) if sv.active_task_id else None
+        return f"Working on: {task.title}" if task else ""
+
+    def _sync(self) -> None:
+        note = self.svc.session_note
+        if note:
+            self._auto = False
+            text = note
+        else:
+            self._typed = ""
+            text = self._task_text()
+            self._auto = bool(text)
+        if self.text() != text:
+            self.setText(text)
+        self._style()
+
+    def focusInEvent(self, e) -> None:
+        super().focusInEvent(e)
+        if self._auto:  # first keystroke replaces the suggestion
+            QTimer.singleShot(0, self.selectAll)

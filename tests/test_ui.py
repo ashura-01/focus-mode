@@ -75,7 +75,7 @@ def test_task_flow_and_stats(app_env):
     assert len(tasks_page.findChildren(type(tasks_page.rows.itemAt(0).widget()))) >= 1
     svc.set_active_task(tid)
     win.timer_page.refresh_task()
-    assert "Write tests" in win.timer_page.task_label.text()
+    assert "Write tests" in win.timer_page.note_box.text()
     svc.pomo.start()
     svc.pomo._t0 -= 600
     svc.pomo.reset()  # logs a 10 minute partial session against the task
