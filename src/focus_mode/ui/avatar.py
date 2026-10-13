@@ -7,7 +7,7 @@ import time
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import QGuiApplication, QColor, QLinearGradient, QPainter, QPainterPath, QPixmap
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QSizePolicy, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from focus_mode import paths
 from focus_mode.services import Services
@@ -128,10 +128,18 @@ class SpeechBubble(QWidget):
         lay.setContentsMargins(22, 16, 22 + TAIL, 14)
         lay.setSpacing(2)
         self.head = QLabel()
+        self.head.setWordWrap(True)
+        self.head.setMinimumWidth(0)
+        self.head.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.body = label("", None, wrap=True)
+        self.body.setWordWrap(True)
+        self.body.setMinimumWidth(0)
+        self.body.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.mark = QLabel("†")
         for lab in (self.head, self.body, self.mark):
             lay.addWidget(lab)
+        self.setMinimumWidth(120)
+        self.setMaximumWidth(width)
         self.setFixedWidth(width)
         theme.changed.connect(self._recolor)
         self._recolor()
@@ -153,12 +161,27 @@ class SpeechBubble(QWidget):
         self._w = round(self._base_w * scale)
         self.setFixedWidth(self._w)
         self._recolor()
-        self.setFixedHeight(self.layout().totalHeightForWidth(self._w))
+        self._sync_height()
+
+    def _sync_height(self) -> None:
+        # Use the layout's real height-for-width calculation so wrapped custom
+        # messages resize the bubble instead of being clipped during window resizes.
+        layout = self.layout()
+        # Activate after text/width changes so QLabel word-wrapping is reflected.
+        layout.activate()
+        width = max(120, self.width())
+        height = layout.totalHeightForWidth(width)
+        if height <= 0:
+            height = layout.sizeHint().height()
+        self.setMinimumHeight(max(64, height))
+        self.setMaximumHeight(16777215)
+        self.setFixedHeight(max(64, height))
+        self.updateGeometry()
 
     def _apply(self, head: str, body: str) -> None:
         self.head.setText(head)
         self.body.setText(body)
-        self.setFixedHeight(self.layout().totalHeightForWidth(self._w))
+        self._sync_height()
         parent = self.parentWidget()
         if parent is not None and hasattr(parent, "place"):
             parent.place()
@@ -223,14 +246,28 @@ class AvatarHeader(QWidget):
         self.knight.setGeometry(w - kw, 0, kw, h)
         self.title_box.move(0, 4)
         self.title_box.adjustSize()
-        # Keep the bubble right next to the knight; the tail points at him.
+
+        # Reserve room for the title on narrow windows; never let the bubble
+        # extend beyond the header's right edge.
+        gap = 12
+        available = max(120, w - min(self.title_box.width() + gap, w // 2) - gap)
+        desired = min(round(self.bubble._base_w * self._scale), available)
+        desired = max(120, desired)
+        if self.bubble.width() != desired:
+            self.bubble.setFixedWidth(desired)
+            self.bubble._w = desired
+            self.bubble._sync_height()
+
         top = round((24 if self.compact else 70) * self._scale)
-        bx = max(0, w - kw - self.bubble.width() + 6)
-        if bx < self.title_box.width() + 8:  # narrow: sit below the title instead of covering it
+        bx = max(0, min(w - self.bubble.width(), w - kw - self.bubble.width() + 6))
+        if bx < self.title_box.width() + 8:
             top = max(top, self.title_box.height() + 10)
+
+        # Keep the whole bubble visible vertically whenever the header permits it.
+        top = min(top, max(0, h - self.bubble.height()))
         self.bubble.move(bx, top)
-        # A bubble that no longer fits inside a squeezed header is hidden rather than cut in half.
-        self.bubble.setVisible(top + self.bubble.height() <= self.height())
+        self.bubble.setVisible(True)
+        self.bubble.raise_()
         self.clock.move(w - self.clock.width() - 4, 8)
         self.clock.raise_()
 
