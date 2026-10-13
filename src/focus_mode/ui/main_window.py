@@ -126,7 +126,7 @@ class MainWindow(QMainWindow):
         for i, (key, tip, page) in enumerate(pages):
             icon_name = {"timer": "timer", "stopwatch": "stopwatch", "tasks": "tasks", "stats": "stats", "settings": "settings"}[key]
             btn = NavButton(icon_name, tip)
-            self.group.addButton(btn, i)
+            self.group.addButton(btn, i) 
             if key == "settings":
                 side.addStretch(1)
                 self.chat_btn = NavButton("sparkles", "AI assistant  (Ctrl+J)")

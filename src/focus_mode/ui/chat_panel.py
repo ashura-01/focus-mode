@@ -350,7 +350,7 @@ class ChatPanel(QWidget):
 
         heading = QHBoxLayout()
         heading.setContentsMargins(0, 0, 0, 0)
-        kicker = QLabel(f"PLAN  /  {self._step_count:02d}")
+        kicker = QLabel(f"Resoning /  {self._step_count:02d}")
         kicker.setStyleSheet(
             "QLabel { color: %s; font-size: 10px; font-weight: 700; "
             "letter-spacing: 1px; background: transparent; border: 0; }"
