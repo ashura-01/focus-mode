@@ -84,15 +84,33 @@ class MessagePicker:
         self.use_ai = False
         self._last: Message | None = None
 
+    # def pool(self, context: str) -> list[Message]:
+    #     pool: list[Message] = []
+    #     # Your own lines replace the built-in focus lines, so they show up while you work.
+    #     if context == "focus" and self.custom:
+    #         pool += [m for line in self.custom if (m := parse_line(line, context))]
+    #     else:
+    #         pool += DEFAULTS.get(context, DEFAULTS["idle"])
+    #     if self.use_ai:
+    #         pool += self.ai.get(context, [])
+    #     return pool
+
     def pool(self, context: str) -> list[Message]:
         pool: list[Message] = []
-        # Your own lines replace the built-in focus lines, so they show up while you work.
-        if context == "focus" and self.custom:
-            pool += [m for line in self.custom if (m := parse_line(line, context))]
+
+        # Custom messages take priority in every context.
+        if self.custom:
+            pool += [
+                m for line in self.custom
+                if (m := parse_line(line, context))
+            ]
         else:
             pool += DEFAULTS.get(context, DEFAULTS["idle"])
+
+        # AI-generated messages are optional.
         if self.use_ai:
             pool += self.ai.get(context, [])
+
         return pool
 
     def next(self, context: str) -> Message:
