@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QPainter, QPainterPath, QPixmap, QTextDocument
@@ -83,6 +84,43 @@ class KnightAvatar(QLabel):
         painter.drawEllipse(0.5, 0.5, self.width() - 1, self.height() - 1)
 
 
+def _make_narrow_tables_readable(markdown: str) -> str:
+    """Convert Markdown tables to stacked field/value rows for the narrow chat sidebar.
+
+    QText labels cannot make wide Markdown tables responsive; turning each record into
+    a short vertical block avoids horizontal clipping without changing the model output.
+    """
+    lines = markdown.splitlines()
+    out: list[str] = []
+    i = 0
+
+    def cells(line: str) -> list[str]:
+        return [part.strip() for part in line.strip().strip("|").split("|")]
+
+    while i < len(lines):
+        if (i + 1 < len(lines) and "|" in lines[i]
+                and re.fullmatch(r"\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*", lines[i + 1])):
+            headers = cells(lines[i])
+            i += 2
+            row_no = 0
+            while i < len(lines) and "|" in lines[i] and lines[i].strip():
+                values = cells(lines[i])
+                if len(values) == len(headers):
+                    parts = []
+                    for header, value in zip(headers, values):
+                        if value:
+                            parts.append(f"**{header}:** {value}" if header else value)
+                    if parts:
+                        out.append("\n".join(parts))
+                        out.append("")
+                i += 1
+                row_no += 1
+            continue
+        out.append(lines[i])
+        i += 1
+    return "\n".join(out).strip()
+
+
 class Bubble(QFrame):
     def __init__(self, role: str, text: str) -> None:
         super().__init__()
@@ -91,15 +129,18 @@ class Bubble(QFrame):
         lay.setContentsMargins(12, 9, 12, 9)
         self.label = QLabel()
         self.label.setTextFormat(Qt.TextFormat.MarkdownText)
-        self.label.setText(text)
-        # Size the label explicitly: wrapped labels inside scroll areas otherwise get clipped.
-        limit = WIDTH - 90
+        # Markdown tables have a large intrinsic width and QLabel clips their cells in
+        # this narrow sidebar. Stack each table row into labelled fields before rendering.
+        display_text = _make_narrow_tables_readable(text)
+        self.label.setText(display_text)
         self.label.setWordWrap(False)
         natural = self.label.sizeHint().width()
         self.label.setWordWrap(True)
+        limit = max(120, WIDTH - 90)
         width = max(40, min(natural + 2, limit))
         self.label.setFixedWidth(width)
-        self.label.setFixedHeight(self.label.heightForWidth(width))
+        self.label.setMinimumHeight(0)
+        self.label.setFixedHeight(max(1, self.label.heightForWidth(width)))
         self.label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         lay.addWidget(self.label)
         theme.changed.connect(self._style)
@@ -122,6 +163,7 @@ class ChatPanel(QWidget):
         self.svc, self.agent = svc, agent
         self._open = False
         self._bottom_queued = False
+        self._step_count = 0
         self.setMaximumWidth(0)
         self.setMinimumWidth(0)
         self._anim = QPropertyAnimation(self, b"maximumWidth", self)
@@ -293,10 +335,40 @@ class ChatPanel(QWidget):
             self._push(bubble, Qt.AlignmentFlag.AlignRight)
 
     def _add_step(self, text: str) -> None:
-        lab = label("›  " + text, "small")
-        lab.setContentsMargins(6, 0, 0, 0)
-        lab.setWordWrap(True)
-        self._push(lab, Qt.AlignmentFlag.AlignLeft)
+        """Render agent/tool progress as compact, subdued planning cards (no extra model calls)."""
+        self._step_count += 1
+        card = QFrame()
+        card.setObjectName("PlanStep")
+        card.setStyleSheet(
+            "QFrame#PlanStep { background: %s; border: 1px solid %s; "
+            "border-left: 2px solid %s; border-radius: 9px; }"
+            % (theme.c("panel").name(), theme.c("border").name(), theme.c("accent").name())
+        )
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(10, 7, 10, 8)
+        layout.setSpacing(3)
+
+        heading = QHBoxLayout()
+        heading.setContentsMargins(0, 0, 0, 0)
+        kicker = QLabel(f"PLAN  /  {self._step_count:02d}")
+        kicker.setStyleSheet(
+            "QLabel { color: %s; font-size: 10px; font-weight: 700; "
+            "letter-spacing: 1px; background: transparent; border: 0; }"
+            % theme.c("accent").name()
+        )
+        heading.addWidget(kicker)
+        heading.addStretch(1)
+        layout.addLayout(heading)
+
+        detail = QLabel(text)
+        detail.setWordWrap(True)
+        detail.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        detail.setStyleSheet(
+            "QLabel { color: %s; font-size: 12px; background: transparent; border: 0; }"
+            % theme.c("muted").name()
+        )
+        layout.addWidget(detail)
+        self._push(card, Qt.AlignmentFlag.AlignLeft)
 
     def _add_report(self, path: str) -> None:
         box = QFrame()
@@ -331,6 +403,7 @@ class ChatPanel(QWidget):
         if not text or self.agent.busy:
             return
         if self.agent.send(text):
+            self._step_count = 0
             self._add_bubble("user", text)
             self.input.clear()
 

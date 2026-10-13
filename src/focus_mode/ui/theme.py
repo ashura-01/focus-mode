@@ -137,6 +137,7 @@ QLabel[role="hint"] { color: $muted; font-size: 12px; }
 QLabel[role="ok"] { color: #34c58a; }
 QLabel[role="bad"] { color: #ff6b70; }
 QLabel[role="accent"] { color: $accent; font-weight: 600; }
+QLabel[role="step"] { color: $text; font-size: 13px; font-weight: 600; }
 
 QPushButton { background: $panel2; border: 1px solid $border; border-radius: 12px; padding: 9px 18px; }
 QPushButton:hover { background: $border; }

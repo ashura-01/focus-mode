@@ -462,7 +462,7 @@ class NoteBox(QLineEdit):
     """One-line note for the session in progress; saved with it when it is logged.
 
     Text you type looks normal. Text put there for you (the task you are working on, or a
-    note the AI set) is shown in the accent colour; typing over it replaces it.
+    note the AI set) is shown in bold whitish-red; typing over it replaces it.
     """
 
     PLACEHOLDER = "Session note — what are you working on? (saved with this session)"
@@ -474,7 +474,7 @@ class NoteBox(QLineEdit):
         self._auto = False  # showing "Working on: …" (never saved as a note)
         self.setPlaceholderText(self.PLACEHOLDER)
         self.setMaxLength(300)
-        self.setClearButtonEnabled(True)
+        self.setClearButtonEnabled(False)
         self.textEdited.connect(self._edited)
         self.editingFinished.connect(self._sync)
         svc.session_note_cleared.connect(self._sync)
@@ -486,7 +486,7 @@ class NoteBox(QLineEdit):
 
     def _style(self) -> None:
         coloured = bool(self.text()) and (self._auto or self.svc.session_note != self._typed)
-        self.setStyleSheet(f"color: {theme.c('accent').name()};" if coloured else "")
+        self.setStyleSheet("color: #ffb3b3; font-weight: 700;" if coloured else "")
 
     def _edited(self, text: str) -> None:
         self._auto = False
