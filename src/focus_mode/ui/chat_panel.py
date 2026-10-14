@@ -5,8 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 import re
 
-from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QPainter, QPainterPath, QPixmap, QTextDocument
+from PySide6.QtCore import QEasingCurve, QPointF, QPropertyAnimation, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QPainter, QPainterPath, QPen, QPixmap, QTextDocument
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -154,6 +154,48 @@ class Bubble(QFrame):
             self.setStyleSheet(f"Bubble {{ background: {theme.c('panel2').name()}; border-radius: 14px; }}")
 
 
+class StepRow(QWidget):
+    """One reasoning step: a theme-coloured bullet joined to its neighbours by a thin line."""
+
+    DOT, LEFT = 4, 8
+
+    def __init__(self, text: str, linked_above: bool) -> None:
+        super().__init__()
+        self._above, self._below = linked_above, False
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(self.LEFT * 2 + 6, 3, 4, 3)
+        self.detail = QLabel(text)
+        self.detail.setWordWrap(True)
+        self.detail.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        lay.addWidget(self.detail)
+        theme.changed.connect(self._style)
+        self._style()
+
+    def _style(self) -> None:
+        self.detail.setStyleSheet(
+            "QLabel { color: %s; font-size: 12px; background: transparent; border: 0; }" % theme.c("muted").name()
+        )
+        self.update()
+
+    def set_linked_below(self, on: bool) -> None:
+        self._below = on
+        self.update()
+
+    def paintEvent(self, _e) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        cy = 3 + self.detail.fontMetrics().height() / 2 + 1  # centre of the first text line
+        if self._above:
+            p.setPen(QPen(theme.alpha("accent", 0.45), 1.5))
+            p.drawLine(QPointF(self.LEFT, 0), QPointF(self.LEFT, cy))
+        if self._below:
+            p.setPen(QPen(theme.alpha("accent", 0.45), 1.5))
+            p.drawLine(QPointF(self.LEFT, cy), QPointF(self.LEFT, self.height()))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(theme.c("accent"))
+        p.drawEllipse(QPointF(self.LEFT, cy), self.DOT, self.DOT)
+
+
 class ChatPanel(QWidget):
     open_settings = Signal()
     collapse_requested = Signal()
@@ -164,6 +206,7 @@ class ChatPanel(QWidget):
         self._open = False
         self._bottom_queued = False
         self._step_count = 0
+        self._last_step: StepRow | None = None
         self.setMaximumWidth(0)
         self.setMinimumWidth(0)
         self._anim = QPropertyAnimation(self, b"maximumWidth", self)
@@ -303,7 +346,9 @@ class ChatPanel(QWidget):
         self.send_btn.setEnabled(ok)
         self.chips_host.setVisible(ok and self.box.count() <= 1)
 
-    def _push(self, widget: QWidget, align: Qt.AlignmentFlag) -> None:
+    def _push(self, widget: QWidget, align: Qt.AlignmentFlag, is_step: bool = False) -> None:
+        if not is_step:
+            self._last_step = None  # a normal message ends the current bullet list
         self.box.insertWidget(self.box.count() - 1, widget, 0, align)
         self.chips_host.hide()
         self._queue_bottom()
@@ -335,40 +380,13 @@ class ChatPanel(QWidget):
             self._push(bubble, Qt.AlignmentFlag.AlignRight)
 
     def _add_step(self, text: str) -> None:
-        """Render agent/tool progress as compact, subdued planning cards (no extra model calls)."""
+        """Render agent/tool progress as a linked bullet list (no extra model calls)."""
         self._step_count += 1
-        card = QFrame()
-        card.setObjectName("PlanStep")
-        card.setStyleSheet(
-            "QFrame#PlanStep { background: %s; border: 1px solid %s; "
-            "border-left: 2px solid %s; border-radius: 9px; }"
-            % (theme.c("panel").name(), theme.c("border").name(), theme.c("accent").name())
-        )
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(10, 7, 10, 8)
-        layout.setSpacing(3)
-
-        heading = QHBoxLayout()
-        heading.setContentsMargins(0, 0, 0, 0)
-        kicker = QLabel(f"Resoning /  {self._step_count:02d}")
-        kicker.setStyleSheet(
-            "QLabel { color: %s; font-size: 10px; font-weight: 700; "
-            "letter-spacing: 1px; background: transparent; border: 0; }"
-            % theme.c("accent").name()
-        )
-        heading.addWidget(kicker)
-        heading.addStretch(1)
-        layout.addLayout(heading)
-
-        detail = QLabel(text)
-        detail.setWordWrap(True)
-        detail.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        detail.setStyleSheet(
-            "QLabel { color: %s; font-size: 12px; background: transparent; border: 0; }"
-            % theme.c("muted").name()
-        )
-        layout.addWidget(detail)
-        self._push(card, Qt.AlignmentFlag.AlignLeft)
+        row = StepRow(text, linked_above=self._last_step is not None)
+        if self._last_step is not None:
+            self._last_step.set_linked_below(True)
+        self._last_step = row
+        self._push(row, Qt.AlignmentFlag.AlignLeft, is_step=True)
 
     def _add_report(self, path: str) -> None:
         box = QFrame()
