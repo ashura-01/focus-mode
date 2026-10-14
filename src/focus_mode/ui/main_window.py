@@ -152,6 +152,8 @@ class MainWindow(QMainWindow):
 
         self.toast = Toast(central)
         svc.toast.connect(self.toast.show_message)
+        if svc.restored:
+            QTimer.singleShot(700, lambda: svc.toast.emit("info", svc.restored))
 
         # Heavy responsive work (header scaling, page margins) is throttled while the window is dragged.
         self._headers = self.findChildren(AvatarHeader)
@@ -164,6 +166,7 @@ class MainWindow(QMainWindow):
         self.mini = MiniTimer()
         self.mini.clicked.connect(self._restore)
         svc.pomo.state_changed.connect(self._sync_mini)
+        svc.pomo.phase_completed.connect(self._phase_done)
         svc.watch.state_changed.connect(self._sync_mini)
         svc.pomo.tick.connect(self._sync_mini)
         svc.watch.tick.connect(self._sync_mini)
@@ -249,15 +252,30 @@ class MainWindow(QMainWindow):
             mark = "⏸ " if p.state == "paused" else ""
             self.setWindowTitle(f"{mark}{fmt.mmss(p.remaining())} · {PHASE_NAMES[p.phase].title()} — {APP_NAME}")
 
+    def _phase_done(self, finished: str, _upcoming: str) -> None:
+        s = self.svc
+        if not s.settings.get("alerts", "mini_timer") or self.isActiveWindow():
+            return
+        detail = "Focus session complete" if finished == "focus" else "Break is over"
+        # With auto-start the next phase is already running, so don't cover the timer for long.
+        self.mini.show_done("TIME'S UP!", detail, expire=bool(s.settings.get("timer", "auto_start")))
+        self._sync_mini()
+
     def _sync_mini(self) -> None:
         s = self.svc
         want = bool(s.settings.get("alerts", "mini_timer")) and not self.isActiveWindow()
-        if want and s.pomo.running:
+        if not want:
+            self.mini.clear_done()
+        if want and self.mini.done:
+            pass  # keep showing "time's up" until it is dismissed
+        elif want and s.pomo.running:
             self.mini.update_state(fmt.mmss(s.pomo.remaining()), PHASE_NAMES[s.pomo.phase], s.pomo.progress())
         elif want and s.watch.running:
             self.mini.update_state(fmt.stopwatch(s.watch.elapsed_ms())[:-3], "STOPWATCH", (s.watch.elapsed_ms() % 60000) / 60000)
         else:
             want = False
+        if self.mini.done and bool(s.settings.get("alerts", "mini_timer")) and not self.isActiveWindow():
+            want = True
         if want and not self.mini.isVisible():
             geo = QGuiApplication.primaryScreen().availableGeometry()
             self.mini.move(geo.right() - self.mini.width() - 24, geo.top() + 24)
@@ -266,6 +284,7 @@ class MainWindow(QMainWindow):
             self.mini.hide()
 
     def _restore(self) -> None:
+        self.mini.clear_done()
         self.showNormal()
         self.raise_()
         self.activateWindow()
@@ -305,7 +324,6 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, e) -> None:
         self.mini.hide()
-        # Log any focus time that's still on the clock instead of silently dropping it.
-        self.svc.pomo.reset()
-        self.svc.watch.reset()
+        # Keep an unfinished session: it is restored (paused) the next time the app starts.
+        self.svc.save_state()
         super().closeEvent(e)

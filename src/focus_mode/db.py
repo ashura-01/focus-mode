@@ -217,6 +217,39 @@ class Database:
         self.conn.commit()
         return cur.rowcount > 0
 
+    def get_session(self, session_id: int) -> dict | None:
+        row = self.conn.execute(
+            "SELECT s.id, s.kind, s.started_at, s.seconds, s.completed, s.note, s.task_id, t.title AS task "
+            "FROM sessions s LEFT JOIN tasks t ON t.id = s.task_id WHERE s.id = ?",
+            (session_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def update_session(self, session_id: int, **fields) -> bool:
+        allowed = {"kind", "seconds", "completed", "task_id", "note", "started_at"}
+        sets, args = [], []
+        for key, value in fields.items():
+            if key not in allowed:
+                continue
+            if key == "started_at" and isinstance(value, datetime):
+                value = self._iso(value)
+            if key == "completed":
+                value = int(bool(value))
+            if key == "note":
+                value = str(value).strip()
+            sets.append(f"{key} = ?")
+            args.append(value)
+        if not sets:
+            return False
+        cur = self.conn.execute(f"UPDATE sessions SET {', '.join(sets)} WHERE id = ?", (*args, session_id))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def delete_session(self, session_id: int) -> bool:
+        cur = self.conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+        self.conn.commit()
+        return cur.rowcount > 0
+
     def recent_sessions(self, limit: int = 10, since: date | None = None) -> list[dict]:
         where, args = "1=1", []
         if since:

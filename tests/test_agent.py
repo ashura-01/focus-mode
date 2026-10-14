@@ -272,3 +272,24 @@ def test_avatar_ai_pauses_while_chatting(env):
         time.sleep(0.01)
     assert not svc.chat_busy
     assert svc._ai_paused()  # and a quiet period follows, so avatar fetches don't land right after a chat
+
+
+def test_session_crud(env):
+    app, svc, ui, tools, agent = env
+    tid = svc.db.add_task("Lab")
+    out = json.loads(tools.run("add_session", {"minutes": 40, "started": "2026-01-05 09:00", "task_id": tid, "note": "labs"}))
+    sid = out["session_id"]
+    row = svc.db.get_session(sid)
+    assert row["seconds"] == 2400 and row["task"] == "Lab" and row["note"] == "labs"
+    assert json.loads(tools.run("update_session", {"session_id": sid, "minutes": 50, "note": "better", "task_id": 0}))["ok"]
+    row = svc.db.get_session(sid)
+    assert row["seconds"] == 3000 and row["note"] == "better" and row["task_id"] is None
+    assert "error" in json.loads(tools.run("update_session", {"session_id": 9999, "note": "x"}))
+    assert "error" in json.loads(tools.run("add_session", {"minutes": 5, "task_id": 777}))
+    assert "error" in json.loads(tools.run("add_session", {"minutes": 5, "started": "2999-01-01 10:00"}))
+    ui.confirm_answer = False
+    assert json.loads(tools.run("delete_session", {"session_id": sid}))["ok"] is False
+    assert svc.db.get_session(sid)
+    ui.confirm_answer = True
+    assert json.loads(tools.run("delete_session", {"session_id": sid}))["ok"]
+    assert svc.db.get_session(sid) is None

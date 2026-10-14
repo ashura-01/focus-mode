@@ -92,6 +92,19 @@ TOOL_SPECS: list[dict] = [
     _fn("delete_task", "Delete a task. The user is asked to confirm.", {"id": _INT}, ["id"]),
     _fn("focus_on_task", "Make a task the active one so new sessions count toward it. id 0 clears it.", {"id": _INT}, ["id"]),
     _fn("list_sessions", "Recent focus sessions with notes.", {"limit": _INT, "days": _INT}),
+    _fn(
+        "add_session",
+        "Log a past focus session by hand (CRUD: create). minutes required; started is 'YYYY-MM-DD HH:MM' (default: it just ended); task_id optional.",
+        {"minutes": _INT, "started": _STR, "task_id": _INT, "note": _STR, "kind": {"type": "string", "enum": ["focus", "stopwatch"]}},
+        ["minutes"],
+    ),
+    _fn(
+        "update_session",
+        "Edit a logged session by id (only the fields you pass change). task_id 0 detaches it from its task.",
+        {"session_id": _INT, "minutes": _INT, "started": _STR, "task_id": _INT, "note": _STR, "completed": _BOOL},
+        ["session_id"],
+    ),
+    _fn("delete_session", "Delete a logged session. The user is asked to confirm.", {"session_id": _INT}, ["session_id"]),
     _fn("set_session_note", "Set the note on a past session (see list_sessions for ids).", {"session_id": _INT, "note": _STR}, ["session_id", "note"]),
     _fn("set_next_session_note", "Set the note that will be saved with the next session that finishes.", {"note": _STR}, ["note"]),
     _fn("get_stats", "Focus statistics for a period, with daily minutes.", {"period": {"type": "string", "enum": ["today", "week", "month", "all"]}}),
@@ -127,6 +140,9 @@ def describe(name: str, args: dict) -> str:
         "delete_task": f"Deleting task #{a.get('id', '?')}",
         "focus_on_task": "Choosing the active task",
         "list_sessions": "Reading recent sessions",
+        "add_session": f"Logging a {a.get('minutes', '?')}-minute session",
+        "update_session": f"Editing session #{a.get('session_id', '?')}",
+        "delete_session": f"Deleting session #{a.get('session_id', '?')}",
         "set_session_note": f"Saving a note on session #{a.get('session_id', '?')}",
         "set_next_session_note": "Saving a note for the next session",
         "get_stats": f"Reading your stats ({a.get('period', 'week')})",
@@ -422,6 +438,66 @@ class AppTools:
              "completed": bool(r["completed"]), "task": r["task"], "note": r["note"] or None}
             for r in rows
         ]})
+
+    @staticmethod
+    def _when(value: str) -> datetime:
+        text = str(value).strip().replace("T", " ")
+        try:
+            return datetime.fromisoformat(text)
+        except ValueError:
+            raise ValueError("started must look like 'YYYY-MM-DD HH:MM'.") from None
+
+    def _task_ok(self, task_id: int) -> None:
+        if task_id and not self.db.get_task(int(task_id)):
+            raise ValueError(f"No task with id {task_id}.")
+
+    def t_add_session(self, minutes: int, started: str = "", task_id: int = 0, note: str = "", kind: str = "focus") -> str:
+        minutes = int(minutes)
+        if not 1 <= minutes <= 24 * 60:
+            return _err("minutes must be between 1 and 1440.")
+        self._task_ok(task_id)
+        when = self._when(started) if started else None
+        if when and when > datetime.now():
+            return _err("A session can't start in the future.")
+        kind = kind if kind in ("focus", "stopwatch") else "focus"
+        sid = self.db.add_session(kind, minutes * 60, True, int(task_id) or None, started_at=when, note=str(note)[:500])
+        self.svc.sessions_changed.emit()
+        return _json({"ok": True, "session_id": sid})
+
+    def t_update_session(self, session_id: int, minutes: int | None = None, started: str | None = None,
+                         task_id: int | None = None, note: str | None = None, completed: bool | None = None) -> str:
+        if not self.db.get_session(int(session_id)):
+            return _err(f"No session with id {session_id}.")
+        fields: dict = {}
+        if minutes is not None:
+            if not 1 <= int(minutes) <= 24 * 60:
+                return _err("minutes must be between 1 and 1440.")
+            fields["seconds"] = int(minutes) * 60
+        if started:
+            fields["started_at"] = self._when(started)
+        if task_id is not None:
+            self._task_ok(task_id)
+            fields["task_id"] = int(task_id) or None
+        if note is not None:
+            fields["note"] = str(note)[:500]
+        if completed is not None:
+            fields["completed"] = bool(completed)
+        if not fields:
+            return _err("Nothing to change.")
+        self.db.update_session(int(session_id), **fields)
+        self.svc.sessions_changed.emit()
+        return _json({"ok": True})
+
+    def t_delete_session(self, session_id: int) -> str:
+        row = self.db.get_session(int(session_id))
+        if not row:
+            return _err(f"No session with id {session_id}.")
+        label = f"{row['seconds'] // 60}-minute session from {row['started_at'][:16].replace('T', ' ')}"
+        if not self.ui.confirm(f"The assistant wants to delete the {label}. Allow?"):
+            return _json({"ok": False, "reason": "The user declined."})
+        self.db.delete_session(row["id"])
+        self.svc.sessions_changed.emit()
+        return _json({"ok": True, "deleted": label})
 
     def t_set_session_note(self, session_id: int, note: str) -> str:
         if not self.db.set_session_note(int(session_id), str(note)[:500]):

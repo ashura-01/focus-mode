@@ -357,3 +357,47 @@ def test_ai_errors(server):
         ai.AIClient("http://127.0.0.1:1/v1", "k", "m", timeout=2).chat("s", "u")
     with pytest.raises(ai.AIError, match="not set up"):
         ai.AIClient("", "", "").chat("s", "u")
+
+
+def test_unfinished_timer_survives_restart(qapp, home):
+    from focus_mode import paths
+    from focus_mode.config import Settings
+    from focus_mode.db import Database
+    from focus_mode.services import Services
+
+    svc = Services(Settings(), Database(paths.db_path()))
+    tid = svc.db.add_task("Keep going")
+    svc.set_active_task(tid)
+    svc.pomo.start()
+    svc.pomo._t0 -= 600  # 10 minutes in
+    svc.watch.start()
+    svc.watch._t0 -= 42
+    svc.session_note = "chapter 2"
+    svc.pomo.pause()
+    svc.save_state()
+    assert svc.db.recent_sessions(5) == []  # closing must not log a bogus session
+
+    again = Services(Settings(), Database(paths.db_path()))  # "restart"
+    assert again.pomo.state == "paused" and abs(again.pomo.remaining() - 15 * 60) < 3
+    assert again.watch.state == "paused" and again.watch.elapsed_ms() >= 42000
+    assert again.active_task_id == tid and again.session_note == "chapter 2"
+    assert "left on your focus timer" in again.restored
+    again.pomo.start()  # continues the same session
+    assert again.pomo.remaining() > 14 * 60
+    again.pomo.reset()
+    again.save_state()
+    third = Services(Settings(), Database(paths.db_path()))
+    assert third.pomo.state == "idle"
+
+
+def test_stale_timer_state_is_ignored(qapp, home):
+    from focus_mode import paths
+    from focus_mode.config import Settings
+    from focus_mode.db import Database
+    from focus_mode.services import Services
+
+    (paths.data_dir() / "timer_state.json").write_text('{"pomo": {"phase": "focus", "cycle": 1, "elapsed": 99999}, "watch": 5}')
+    svc = Services(Settings(), Database(paths.db_path()))
+    assert svc.pomo.state == "idle" and svc.watch.state == "idle"
+    (paths.data_dir() / "timer_state.json").write_text("not json")
+    Services(Settings(), Database(paths.db_path()))

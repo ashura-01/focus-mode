@@ -94,6 +94,28 @@ class PomodoroEngine(QObject):
         self.cycle = min(self.cycle, self.cycles)
         self.state_changed.emit()
 
+    # -- persistence --------------------------------------------------------
+    def snapshot(self) -> dict:
+        return {"phase": self.phase, "cycle": self.cycle, "elapsed": round(self.elapsed(), 1)}
+
+    def restore(self, data: dict) -> bool:
+        """Put back a saved session as *paused*, so nothing starts counting by surprise."""
+        try:
+            phase, cycle, elapsed = str(data["phase"]), int(data["cycle"]), float(data["elapsed"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        if phase not in ("focus", "short", "long"):
+            return False
+        self._timer.stop()
+        self.phase = phase
+        self.cycle = max(1, min(cycle, self.cycles))
+        if not 0 <= elapsed < self.duration() - 1:
+            elapsed = 0.0  # the saved time no longer fits (e.g. the focus length was shortened)
+        self._elapsed = elapsed
+        self.state = "paused" if elapsed >= 1 else "idle"
+        self.state_changed.emit()
+        return self.state == "paused"
+
     # -- internals ----------------------------------------------------------
     def _stop_clock(self) -> None:
         self._timer.stop()
@@ -177,6 +199,24 @@ class StopwatchEngine(QObject):
 
     def toggle(self) -> None:
         self.pause() if self.running else self.start()
+
+    def snapshot(self) -> dict:
+        return {"elapsed_ms": self.elapsed_ms(), "laps": list(self.laps)}
+
+    def restore(self, data: dict) -> bool:
+        try:
+            ms = int(data["elapsed_ms"])
+            laps = [int(x) for x in data.get("laps", [])]
+        except (KeyError, TypeError, ValueError):
+            return False
+        if ms < 1000:
+            return False
+        self._timer.stop()
+        self._elapsed = ms / 1000.0
+        self.laps = laps
+        self.state = "paused"
+        self.state_changed.emit()
+        return True
 
     def lap(self) -> None:
         if self.state != "idle":

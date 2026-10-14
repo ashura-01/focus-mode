@@ -6,6 +6,8 @@ reach into each other.
 
 from __future__ import annotations
 
+import json
+import os
 import threading
 import time
 from typing import Callable
@@ -87,9 +89,62 @@ class Services(QObject):
         self.watch.state_changed.connect(self._refresh_context)
         settings.changed.connect(self._settings_changed)
 
+        self._state_file = paths.data_dir() / "timer_state.json"
+        self._last_saved = ""
+        self.restored: str = ""  # human text if an unfinished session was put back at start-up
+        self._restore_state()
+        for sig in (self.pomo.state_changed, self.watch.state_changed, self.active_task_changed):
+            sig.connect(self.save_state)
+        self._saver = QTimer(self)  # while a timer runs, keep the file fresh in case of a crash
+        self._saver.timeout.connect(self.save_state)
+        self._saver.start(5000)
+
         self._rotator = QTimer(self)
         self._rotator.timeout.connect(self.rotate_message)
         self._apply_message_settings()
+
+    # -- timer persistence --------------------------------------------------
+    def save_state(self) -> None:
+        data = {
+            "pomo": self.pomo.snapshot(),
+            "watch": self.watch.snapshot(),
+            "task_id": self.active_task_id,
+            "note": self.session_note,
+        }
+        text = json.dumps(data)
+        # elapsed time changes every tick; only touch the disk when something is actually running/changed
+        if text == self._last_saved:
+            return
+        self._last_saved = text
+        try:
+            tmp = self._state_file.with_suffix(".tmp")
+            tmp.write_text(text, encoding="utf-8")
+            os.replace(tmp, self._state_file)
+        except OSError:
+            pass  # not being able to save must never break the timer
+
+    def _restore_state(self) -> None:
+        try:
+            data = json.loads(self._state_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if not isinstance(data, dict):
+            return
+        parts = []
+        if isinstance(data.get("pomo"), dict) and self.pomo.restore(data["pomo"]):
+            from focus_mode import fmt
+
+            parts.append(f"{fmt.mmss(self.pomo.remaining())} left on your {self.pomo.phase} timer")
+        if isinstance(data.get("watch"), dict) and self.watch.restore(data["watch"]):
+            parts.append("your stopwatch")
+        task_id = data.get("task_id")
+        if isinstance(task_id, int) and self.db.get_task(task_id):
+            self.active_task_id = task_id
+        note = data.get("note")
+        if isinstance(note, str):
+            self.session_note = note[:500]
+        if parts:
+            self.restored = "Picked up where you left off: " + " and ".join(parts) + ". Press Start to continue."
 
     # -- AI -----------------------------------------------------------------
     def ai_client(self) -> ai_mod.AIClient:
@@ -246,6 +301,11 @@ class Services(QObject):
 
     def wipe_data(self) -> None:
         self.db.wipe()
+        try:
+            self._state_file.unlink()
+        except OSError:
+            pass
+        self._last_saved = ""
         self.memory.wipe()
         self.session_note = ""
         self.session_note_cleared.emit()
