@@ -51,6 +51,7 @@ class TaskRow(QFrame):
     def __init__(self, task: Task, active: bool) -> None:
         super().__init__()
         self.task = task
+        self.active = active
         self.setObjectName("TaskCard")  # every task is its own card (see theme.py)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.signature = self.make_signature(task, active)
@@ -87,7 +88,17 @@ class TaskRow(QFrame):
         lay.addLayout(col, 1)
 
         if active:
-            lay.addWidget(label("● focusing", "accent"))
+            # Clicking the tag undoes "Focus on this task".
+            tag = QPushButton("● focusing")
+            tag.setFlat(True)
+            tag.setCursor(Qt.CursorShape.PointingHandCursor)
+            tag.setToolTip("Click to stop focusing on this task")
+            tag.setStyleSheet(
+                "QPushButton{border:0;background:transparent;padding:2px 4px;font-weight:700;color:%s}"
+                "QPushButton:hover{text-decoration:underline}" % theme.c("accent").name()
+            )
+            tag.clicked.connect(lambda: self.action.emit(self.task.id, "unfocus"))
+            lay.addWidget(tag)
         lay.addWidget(PriorityChip(task.priority))
 
         more = QPushButton()
@@ -124,7 +135,9 @@ class TaskRow(QFrame):
 
     def _menu(self, anchor: QWidget) -> None:
         menu = QMenu(self)
-        if not self.task.done:
+        if self.active:
+            menu.addAction("Stop focusing on this task").triggered.connect(lambda: self.action.emit(self.task.id, "unfocus"))
+        elif not self.task.done:
             menu.addAction("Focus on this task").triggered.connect(lambda: self.action.emit(self.task.id, "focus"))
         menu.addAction("Edit").triggered.connect(lambda: self.action.emit(self.task.id, "edit"))
         menu.addSeparator()
@@ -427,6 +440,10 @@ class TasksPage(QWidget):
         if what == "focus":
             self.svc.set_active_task(task_id)
             self.svc.toast.emit("ok", f"Sessions will count toward “{task.title}”.")
+        elif what == "unfocus":
+            if self.svc.active_task_id == task_id:
+                self.svc.set_active_task(None)
+                self.svc.toast.emit("ok", f"No longer focusing on “{task.title}”.")
         elif what == "delete":
             if self.svc.active_task_id == task_id:
                 self.svc.set_active_task(None)
