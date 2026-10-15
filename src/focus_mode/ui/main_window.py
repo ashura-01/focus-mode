@@ -165,6 +165,10 @@ class MainWindow(QMainWindow):
 
         self.mini = MiniTimer()
         self.mini.clicked.connect(self._restore)
+        self._mini_task = ""
+        svc.active_task_changed.connect(self._refresh_mini_task)
+        svc.tasks_changed.connect(self._refresh_mini_task)
+        self._refresh_mini_task()
         svc.pomo.state_changed.connect(self._sync_mini)
         svc.pomo.phase_completed.connect(self._phase_done)
         svc.watch.state_changed.connect(self._sync_mini)
@@ -261,6 +265,13 @@ class MainWindow(QMainWindow):
         self.mini.show_done("TIME'S UP!", detail, expire=bool(s.settings.get("timer", "auto_start")))
         self._sync_mini()
 
+    def _refresh_mini_task(self) -> None:
+        """Cache the focused task's title (the mini timer repaints many times a second)."""
+        s = self.svc
+        task = s.db.get_task(s.active_task_id) if s.active_task_id else None
+        self._mini_task = task.title if task and not task.done else ""
+        self._sync_mini()
+
     def _sync_mini(self) -> None:
         s = self.svc
         want = bool(s.settings.get("alerts", "mini_timer")) and not self.isActiveWindow()
@@ -269,9 +280,9 @@ class MainWindow(QMainWindow):
         if want and self.mini.done:
             pass  # keep showing "time's up" until it is dismissed
         elif want and s.pomo.running:
-            self.mini.update_state(fmt.mmss(s.pomo.remaining()), PHASE_NAMES[s.pomo.phase], s.pomo.progress())
+            self.mini.update_state(fmt.mmss(s.pomo.remaining()), PHASE_NAMES[s.pomo.phase], s.pomo.progress(), self._mini_task)
         elif want and s.watch.running:
-            self.mini.update_state(fmt.stopwatch(s.watch.elapsed_ms())[:-3], "STOPWATCH", (s.watch.elapsed_ms() % 60000) / 60000)
+            self.mini.update_state(fmt.stopwatch(s.watch.elapsed_ms())[:-3], "STOPWATCH", (s.watch.elapsed_ms() % 60000) / 60000, self._mini_task)
         else:
             want = False
         if self.mini.done and bool(s.settings.get("alerts", "mini_timer")) and not self.isActiveWindow():

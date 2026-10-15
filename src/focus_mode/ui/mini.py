@@ -7,7 +7,7 @@ ends the bubble says so. Drag it anywhere; double-click it to open Focus Mode.
 from __future__ import annotations
 
 from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QFont, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import QFont, QFontMetrics, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QWidget
 
 from focus_mode import paths
@@ -15,6 +15,8 @@ from focus_mode.ui.theme import theme
 
 HEAD = 60  # diameter of the knight's head
 TAIL = 10
+BASE_H = 80  # window height with no task
+TASK_H = 20  # extra height for the "task title" line
 DONE_SECONDS = 20  # how long "time is up" stays up if the timer keeps running afterwards
 
 
@@ -28,9 +30,10 @@ class MiniTimer(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
-        self.setFixedSize(256, 80)
+        self.setFixedSize(292, BASE_H)
         self.setCursor(Qt.CursorShape.SizeAllCursor)
         self._time, self._caption, self._progress = "00:00", "FOCUS", 0.0
+        self._task = ""
         self._done: tuple[str, str] | None = None
         self._drag: QPoint | None = None
         self._source = QPixmap(str(paths.asset("knight.png")))
@@ -46,8 +49,17 @@ class MiniTimer(QWidget):
     def done(self) -> bool:
         return self._done is not None
 
-    def update_state(self, time_text: str, caption: str, progress: float) -> None:
+    def update_state(self, time_text: str, caption: str, progress: float, task: str = "") -> None:
         self._time, self._caption, self._progress = time_text, caption, progress
+        task = " ".join(task.split())
+        if task != self._task:
+            self._task = task
+            self.setToolTip(
+                (f"Focusing on: {task}\n" if task else "") + "Drag to move. Double-click to open Focus Mode."
+            )
+        height = BASE_H + (TASK_H if task else 0)
+        if height != self.height():
+            self.setFixedSize(self.width(), height)
         self.update()
 
     def show_done(self, title: str, detail: str, expire: bool = False) -> None:
@@ -142,6 +154,16 @@ class MiniTimer(QWidget):
         p.setFont(font)
         p.setPen(theme.c("muted"))
         p.drawText(QRectF(body.left(), body.top() + 40, body.width(), 14), Qt.AlignmentFlag.AlignCenter, self._caption)
+        if self._task:
+            # Same look as the "● focusing" tag: bold, accent colour. Long titles end in "…".
+            tf = QFont(self.font())
+            tf.setPixelSize(11)
+            tf.setWeight(QFont.Weight.Bold)
+            p.setFont(tf)
+            p.setPen(theme.c("accent"))
+            room = int(body.width() - 24)
+            text = QFontMetrics(tf).elidedText("● " + self._task, Qt.TextElideMode.ElideRight, room)
+            p.drawText(QRectF(body.left() + 12, body.top() + 56, body.width() - 24, 16), Qt.AlignmentFlag.AlignCenter, text)
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(theme.c("accent"))
         p.drawRoundedRect(QRectF(body.left() + 18, body.bottom() - 9, (body.width() - 36) * max(0.0, min(1.0, self._progress)), 3), 1.5, 1.5)
