@@ -212,7 +212,7 @@ class Services(QObject):
         self._maybe_fetch_ai_messages()
 
     def _settings_changed(self, section: str, key: str) -> None:
-        if section in ("messages", "ai", "*"):
+        if section in ("messages", "ai", "*") and not (section == "ai" and key == "instructions"):
             self._ai_fetched.clear()
             self._apply_message_settings()
             self.rotate_message()
@@ -259,7 +259,7 @@ class Services(QObject):
             return
         if self._ai_paused() or self.context in self._ai_fetched or not self.ai_client().configured:
             return
-        if time.monotonic() < self._ai_retry_after:
+        if time.monotonic() < self._ai_retry_after or ai_mod.cooldown_left() > 0:
             return
         self._ai_fetched.add(self.context)
         context = self.context
@@ -269,8 +269,9 @@ class Services(QObject):
 
         def failed(msg: str) -> None:
             self._ai_fetched.discard(context)
-            self._ai_retry_after = time.monotonic() + 300  # one toast, then leave it alone for 5 minutes
-            self.toast.emit("error", f"AI messages: {msg} Using the built-in lines for now.")
+            self._ai_retry_after = time.monotonic() + 300  # leave it alone for 5 minutes
+            if "busy" not in msg.lower() and "rate" not in msg.lower():  # background lines never nag about a busy model
+                self.toast.emit("error", f"AI messages: {msg} Using the built-in lines for now.")
 
         self.run_ai(lambda c: ai_mod.generate_messages(c, context), done, failed)
 

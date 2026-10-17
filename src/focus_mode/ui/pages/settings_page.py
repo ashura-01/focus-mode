@@ -214,6 +214,19 @@ class SettingsPage(QWidget):
         box.addWidget(setting_row("Base URL", "", self.url_edit, stack=True))
         box.addWidget(setting_row("API key", "", key_widget, stack=True))
         box.addWidget(setting_row("Model", "", self.model_edit, stack=True))
+        self.instr_edit = QPlainTextEdit(s.get("ai", "instructions"))
+        self.instr_edit.setPlaceholderText("e.g. Call me Fahim. Keep answers under 3 lines. Plan my study around exams first.")
+        self.instr_edit.setFixedHeight(110)
+        box.addWidget(
+            setting_row(
+                "Important instructions",
+                "The Knight sees these in every chat, so you don't have to repeat yourself. Max 1500 characters.",
+                self.instr_edit,
+                stack=True,
+            )
+        )
+        self.instr_save = button("Save instructions", "primary")
+        box.addWidget(self.instr_save)
         test_row = QHBoxLayout()
         self.test_btn = button("Test connection", "ghost", "zap")
         self.test_status = label("", "hint", wrap=True)
@@ -311,6 +324,7 @@ class SettingsPage(QWidget):
             lambda on: self.key_edit.setEchoMode(QLineEdit.EchoMode.Normal if on else QLineEdit.EchoMode.Password)
         )
         self.test_btn.clicked.connect(self._test_ai)
+        self.instr_save.clicked.connect(self._save_instructions)
 
         self.mem_tabs.changed.connect(lambda k: s.set("memory", "mode", k))
         self.name_edit.editingFinished.connect(lambda: s.set("profile", "name", self.name_edit.text().strip()))
@@ -358,6 +372,7 @@ class SettingsPage(QWidget):
             (self.url_edit, s.get("ai", "base_url")),
             (self.key_edit, s.get("ai", "api_key")),
             (self.model_edit, s.get("ai", "model")),
+            (self.instr_edit, s.get("ai", "instructions")),
             (self.name_edit, s.get("profile", "name")),
             (self.folder_edit, s.get("profile", "report_folder")),
         ):
@@ -382,6 +397,11 @@ class SettingsPage(QWidget):
         s.set("ai", "base_url", self.url_edit.text().strip())
         s.set("ai", "api_key", self.key_edit.text().strip())
         s.set("ai", "model", self.model_edit.text().strip())
+
+    def _save_instructions(self) -> None:
+        text = self.instr_edit.toPlainText().strip()[:1500]
+        self.settings.set("ai", "instructions", text)
+        self.test_status.setText("Instructions saved.")
 
     def _test_ai(self) -> None:
         self._save_ai()

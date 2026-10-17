@@ -30,7 +30,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
     "messages": {"enabled": True, "interval_sec": 45, "use_ai": False, "custom": []},
     "memory": {"mode": "light"},
     "profile": {"name": "", "report_folder": ""},
-    "ai": {"base_url": "https://api.openai.com/v1", "api_key": "", "model": "gpt-4o-mini"},
+    "ai": {"base_url": "https://api.openai.com/v1", "api_key": "", "model": "gpt-4o-mini", "instructions": ""},
 }
 
 _LIMITS = {

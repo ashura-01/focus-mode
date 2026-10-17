@@ -10,6 +10,8 @@ from __future__ import annotations
 import ast
 import json
 import re
+import threading
+import time
 import urllib.error
 import urllib.request
 from urllib.parse import urlparse
@@ -27,10 +29,71 @@ JSON_FAILED = "The model's reply wasn't valid JSON. Try again or pick a stronger
 class AIError(Exception):
     """A problem the user can read and act on."""
 
-    def __init__(self, message: str = "", code: int | None = None, raw: str = "") -> None:
+    def __init__(self, message: str = "", code: int | None = None, raw: str = "", retry_after: float = 0.0) -> None:
         super().__init__(message)
         self.code = code  # HTTP status, when the server sent one
+        self.retry_after = retry_after  # seconds the server asked us to wait (Retry-After), 0 if unknown
         self.raw = raw  # the model's last raw reply, when JSON parsing failed
+
+
+# -- shared pacing ----------------------------------------------------------
+# Every AI call in the app (chat agent, tasks, stats, avatar lines) goes through one gate, so they
+# can't burst the provider together and a 429 pauses *all* of them instead of each one retrying alone.
+MIN_GAP = 1.0  # seconds between any two requests
+_gate_lock = threading.Lock()
+_next_ok = 0.0  # monotonic time before which no request is sent
+_json_ok: dict[tuple[str, str], bool] = {}  # (url, model) -> server accepts response_format
+_cache: dict[str, tuple[float, object]] = {}
+CACHE_TTL = 600.0
+
+
+def cooldown_left() -> float:
+    """Seconds until the provider may be called again (0 when free)."""
+    return max(0.0, _next_ok - time.monotonic())
+
+
+def _reserve_slot(wait: bool, cancel=None) -> None:
+    """Block until it's our turn (chat) or fail fast (background jobs) when the provider is cooling down."""
+    global _next_ok
+    while True:
+        with _gate_lock:
+            now = time.monotonic()
+            if now >= _next_ok:
+                _next_ok = now + MIN_GAP
+                return
+            left = _next_ok - now
+        if not wait:
+            raise AIError(f"The model is busy. Try again in {int(left) + 1}s.", code=429, retry_after=left)
+        if cancel and cancel():
+            raise AIError("Cancelled.")
+        time.sleep(min(left, 0.25))
+
+
+def _cool_down(seconds: float) -> None:
+    global _next_ok
+    with _gate_lock:
+        _next_ok = max(_next_ok, time.monotonic() + seconds)
+
+
+def _retry_after(exc: urllib.error.HTTPError) -> float:
+    try:
+        return max(0.0, min(float(exc.headers.get("Retry-After", "0")), 120.0))
+    except (TypeError, ValueError, AttributeError):
+        return 0.0
+
+
+def _cached(key: str):
+    hit = _cache.get(key)
+    if hit and time.monotonic() - hit[0] < CACHE_TTL:
+        return hit[1]
+    return None
+
+
+def _remember(key: str, value):
+    if len(_cache) > 64:
+        _cache.clear()
+    _cache[key] = (time.monotonic(), value)
+    return value
 
 
 def _is_local(url: str) -> bool:
@@ -43,7 +106,8 @@ class AIClient:
         self.api_key = api_key.strip()
         self.model = model.strip()
         self.timeout = timeout
-        self._json_mode = True  # try response_format=json_object; switched off if the server refuses it
+        # try response_format=json_object; switched off if the server refuses it (remembered across clients)
+        self._json_mode = _json_ok.get((self.base_url, self.model), True)
 
     @property
     def configured(self) -> bool:
@@ -63,23 +127,29 @@ class AIClient:
         )
         return clean_reply(_content_text(msg))
 
-    def chat_json(self, system: str, user: str, temperature: float = 0.2, max_tokens: int = 700):
+    def chat_json(self, system: str, user: str, temperature: float = 0.2, max_tokens: int = 700, cache: bool = False):
         """Ask for JSON and return the parsed object.
 
         Copes with what real models do: reasoning blocks, code fences, chatter, trailing commas,
         single quotes and replies cut off by the token limit. Uses the server's JSON mode when it
         has one, and retries once with a stricter instruction before giving up.
         """
-        budget = max(max_tokens * 2, 1200)  # reasoning models spend tokens thinking before they answer
+        key = f"{self.model}|{system}|{user}" if cache else ""
+        if key and (hit := _cached(key)) is not None:
+            return hit
+        budget = max_tokens + 300  # small headroom for models that think a little before answering
         messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
         text = ""
         for attempt in range(2):
             msg = self._complete_json(messages, temperature if attempt == 0 else 0.0, budget)
             text = _reply_text(msg)
             try:
-                return extract_json(text)
+                value = extract_json(text)
+                return _remember(key, value) if key else value
             except AIError:
                 pass
+            if attempt == 1:
+                break
             messages = [
                 *messages[:2],
                 {"role": "assistant", "content": text[:1500] or "(no answer)"},
@@ -89,7 +159,7 @@ class AIClient:
                     "no explanation, no reasoning, no code fences.",
                 },
             ]
-            budget = min(budget * 2, 4000)
+            budget = min(budget + 400, 1500)
         raise AIError(JSON_FAILED, raw=text)
 
     def _complete_json(self, messages: list[dict], temperature: float, max_tokens: int) -> dict:
@@ -102,6 +172,7 @@ class AIClient:
                 if exc.code not in (400, 415, 422):
                     raise
                 self._json_mode = False  # this server doesn't take response_format; remember that
+                _json_ok[(self.base_url, self.model)] = False
         return self.complete(messages, temperature=temperature, max_tokens=max_tokens)
 
     def complete(
@@ -111,10 +182,17 @@ class AIClient:
         temperature: float = 0.7,
         max_tokens: int = 700,
         response_format: dict | None = None,
+        wait: bool = False,
+        cancel=None,
     ) -> dict:
-        """One chat-completions call. Returns the assistant message (may contain tool_calls)."""
+        """One chat-completions call. Returns the assistant message (may contain tool_calls).
+
+        wait=True (the chat agent) queues behind the shared pacing gate; background callers fail fast
+        with a readable message while the provider is cooling down.
+        """
         if not self.configured:
             raise AIError("AI is not set up. Add a base URL, API key and model in Settings.")
+        _reserve_slot(wait, cancel)
         payload: dict = {"model": self.model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
         if tools:
             payload["tools"] = tools
@@ -130,7 +208,10 @@ class AIClient:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8", "replace"))
         except urllib.error.HTTPError as exc:
-            raise AIError(_http_message(exc, tools_used=bool(tools)), code=exc.code) from None
+            after = _retry_after(exc)
+            if exc.code in (429, 503, 529):
+                _cool_down(after or 3.0)  # pause every AI feature, not just this call
+            raise AIError(_http_message(exc, tools_used=bool(tools)), code=exc.code, retry_after=after) from None
         except urllib.error.URLError as exc:
             raise AIError(f"Can't reach the AI server: {exc.reason}") from None
         except (TimeoutError, OSError):
@@ -324,7 +405,7 @@ def suggest_priority(client: AIClient, title: str, due: str | None = None) -> di
         'Return {"priority": "high|medium|low", "minutes": <realistic focus minutes, integer>, '
         '"reason": "<max 12 words>"}'
     )
-    data = client.chat_json(SYSTEM_JSON, prompt, temperature=0.2, max_tokens=150)
+    data = client.chat_json(SYSTEM_JSON, prompt, temperature=0.2, max_tokens=150, cache=True)
     if not isinstance(data, dict):
         raise AIError("Unexpected answer from the model.")
     priority = str(data.get("priority", "medium")).lower()
@@ -347,7 +428,7 @@ def prioritize_tasks(client: AIClient, tasks: list[dict]) -> dict[int, tuple[str
         f"Tasks: {json.dumps(tasks, ensure_ascii=False)}\n"
         'Return {"priorities": [{"id": <int>, "priority": "high|medium|low", "reason": "<max 10 words>"}]}'
     )
-    data = client.chat_json(SYSTEM_JSON, prompt, temperature=0.2, max_tokens=900)
+    data = client.chat_json(SYSTEM_JSON, prompt, temperature=0.2, max_tokens=900, cache=True)
     items = data.get("priorities", []) if isinstance(data, dict) else data
     valid = {t["id"] for t in tasks}
     out: dict[int, tuple[str, str]] = {}
