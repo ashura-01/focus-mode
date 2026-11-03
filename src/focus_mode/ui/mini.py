@@ -1,13 +1,28 @@
-"""Small always-on-top HUD shown while the main window is in the background.
+"""Compact always-on-top HUD shown while the main window is in the background.
 
-Sci-fi panel with a knight medallion on the left, a glowing timer and
-large focused-task title in the middle, and a bright right-aligned
-session caption on the right. Theme-aware, draggable, and double-clickable.
+A small glass card: the knight sits inside a progress ring, the time ticks over
+with a rolling-digit animation, and the focused task sits underneath. Animated
+(pop-in / pop-out, smooth ring, breathing glow, sheen, ripples when a session
+ends), theme-aware, draggable, double-click to open Focus Mode.
+
+All motion is driven from here and respects the "Animations" setting.
 """
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, QTimer, Signal
+import math
+import time
+
+from PySide6.QtCore import (
+    QEasingCurve,
+    QPoint,
+    QPointF,
+    QRectF,
+    Qt,
+    QTimer,
+    QVariantAnimation,
+    Signal,
+)
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -18,6 +33,7 @@ from PySide6.QtGui import (
     QPen,
     QPixmap,
     QPolygonF,
+    QRadialGradient,
 )
 from PySide6.QtWidgets import QWidget
 
@@ -25,47 +41,55 @@ from focus_mode import paths
 from focus_mode.ui.theme import theme
 
 
-# -- Layout --------------------------------------------------------------------
+# -- Layout (logical pixels) ----------------------------------------------------
 
-W, H = 520, 140
-SCALE = 0.56
+M = 12  # transparent margin around the card, room for the soft shadow
+CW, CH = 272, 67  # the card itself
+RADIUS = 20.0
 
-AV_C = QPointF(74, H / 2)
-AV_R = 50.0
-RING_R = 60.0
+AV_CX = M + 33.0  # medallion centre
+AV_CY = M + CH / 2
+RING_R = 24.0
+AV_R = 17.5
 
-LEFT = 172
-DIV_X = W - 150
+TEXT_X = M + 70.0
+TEXT_R = M + CW - 16.0
+
+# Jumping equaliser bars on the right.
+BARS = 7
+BAR_W, BAR_GAP = 4.0, 3.6
+BARS_W = BARS * BAR_W + (BARS - 1) * BAR_GAP
+BARS_X0 = TEXT_R - BARS_W
+BARS_CY = M + 27.0
+BARS_H = 34.0  # tallest bar
+TEXT_ROOM = BARS_X0 - 14.0 - TEXT_X  # width left for the text column
 
 DONE_SECONDS = 20
-FONT_FAMILIES = [
-    "Orbitron",
-    "Exo 2",
-    "Rajdhani",
-    "Segoe UI",
-    "Inter",
-    "Noto Sans",
-]
+FONT_FAMILIES = ["Inter", "SF Pro Display", "Segoe UI", "Noto Sans", "Cantarell", "DejaVu Sans"]
 
 
-def _font(
-    px: float,
-    weight: QFont.Weight = QFont.Weight.Normal,
-    spacing: float = 0.0,
-) -> QFont:
+def _font(px: float, weight: QFont.Weight = QFont.Weight.Normal, spacing: float = 0.0) -> QFont:
     f = QFont()
     f.setFamilies(FONT_FAMILIES)
-    f.setPixelSize(max(1, int(px)))
+    f.setPixelSize(max(1, int(round(px))))
     f.setWeight(weight)
-
     if spacing:
         f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, spacing)
-
     return f
 
 
 def _width(font: QFont, text: str) -> float:
     return QFontMetricsF(font).horizontalAdvance(text)
+
+
+def _lighten(c: QColor, amount: float) -> QColor:
+    return QColor(*(round(v + (255 - v) * amount) for v in (c.red(), c.green(), c.blue())))
+
+
+def _alpha(c: QColor, a: float) -> QColor:
+    out = QColor(c)
+    out.setAlphaF(max(0.0, min(1.0, a)))
+    return out
 
 
 class MiniTimer(QWidget):
@@ -74,16 +98,14 @@ class MiniTimer(QWidget):
     def __init__(self) -> None:
         super().__init__(
             None,
-            Qt.WindowType.Tool
-            | Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint,
+            Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint,
         )
-
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
-        self.setFixedSize(round(W * SCALE), round(H * SCALE))
+        self.setFixedSize(CW + 2 * M, CH + 2 * M)
         self.setCursor(Qt.CursorShape.SizeAllCursor)
 
+        # content
         self._time = "00:00"
         self._caption = "FOCUS SESSION"
         self._progress = 0.0
@@ -91,74 +113,229 @@ class MiniTimer(QWidget):
         self._done: tuple[str, str] | None = None
         self._drag: QPoint | None = None
 
+        # animated values (0..1 unless noted)
+        self._appear = 1.0  # pop-in / pop-out; overshoots a little on the way in
+        self._exiting = False
+        self._hover = 0.0
+        self._shown_progress = 0.0  # eased copy of the real progress
+        self._roll = 1.0  # digit roll-over
+        self._roll_from = ""
+        self._cap_fade = 1.0  # caption cross-fade
+        self._cap_from = ""
+        self._bump = 1.0  # springy scale when a session ends
+        self._sheen = 0.0  # light sweep across the card (0 = off)
+        self._done_t0 = 0.0
+        self._phase = 0.0  # equaliser clock, advances faster when a session ends
+        self._t = time.monotonic()
+        self._anims: dict[str, QVariantAnimation] = {}
+
         self._source = QPixmap(str(paths.asset("knight.png")))
         self._head: QPixmap | None = None
+
+        # Drives the "alive" motion (breathing glow, pulsing dot, colon blink, ripples). Only runs while shown.
+        self._clock = QTimer(self)
+        self._clock.setInterval(33)
+        self._clock.timeout.connect(self._on_clock)
 
         self._expire = QTimer(self)
         self._expire.setSingleShot(True)
         self._expire.timeout.connect(self.clear_done)
 
         self.setToolTip("Drag to move. Double-click to open Focus Mode.")
-        theme.changed.connect(self.update)
+        theme.changed.connect(self._on_theme)
 
-    # -- State -----------------------------------------------------------------
+    # -- Public state ------------------------------------------------------------
 
     @property
     def done(self) -> bool:
         return self._done is not None
 
-    def update_state(
-        self,
-        time_text: str,
-        caption: str,
-        progress: float,
-        task: str = "",
-    ) -> None:
-        self._time = time_text
-        self._caption = caption
-        self._progress = progress
+    @property
+    def shown(self) -> bool:
+        """Visible and not on its way out."""
+        return self.isVisible() and not self._exiting
+
+    def update_state(self, time_text: str, caption: str, progress: float, task: str = "") -> None:
+        progress = max(0.0, min(1.0, progress))
+
+        if time_text != self._time:
+            if self.isVisible() and theme.animations and len(time_text) == len(self._time):
+                self._roll_from = self._time
+                self._tween("_roll", 0.0, 1.0, 260, QEasingCurve.Type.OutCubic)
+            self._time = time_text
+
+        if caption != self._caption:
+            if self.isVisible() and theme.animations:
+                self._cap_from = self._caption
+                self._tween("_cap_fade", 0.0, 1.0, 240, QEasingCurve.Type.OutCubic)
+                self._tween("_sheen", 0.0, 1.0, 900, QEasingCurve.Type.InOutSine)
+            self._caption = caption
+
+        if progress != self._progress:
+            self._progress = progress
+            self._ease_progress()
 
         task = " ".join(task.split())
-
         if task != self._task:
             self._task = task
             self.setToolTip(
-                (f"Focusing on: {task}\n" if task else "")
-                + "Drag to move. Double-click to open Focus Mode."
+                (f"Focusing on: {task}\n" if task else "") + "Drag to move. Double-click to open Focus Mode."
             )
 
         self.update()
 
-    def show_done(
-        self,
-        title: str,
-        detail: str,
-        expire: bool = False,
-    ) -> None:
-        self._done = (title, detail)
+    def show_done(self, title: str, detail: str, expire: bool = False) -> None:
         self._expire.stop()
+        first = self._done is None
+        self._done = (title, detail)
+        self._done_t0 = time.monotonic()
 
         if expire:
             self._expire.start(DONE_SECONDS * 1000)
 
+        if first and self.isVisible() and theme.animations:
+            self._tween("_bump", 0.0, 1.0, 700, QEasingCurve.Type.OutElastic)
+            self._tween("_sheen", 0.0, 1.0, 1000, QEasingCurve.Type.InOutSine)
+        self._ease_progress()
         self.update()
 
     def clear_done(self) -> None:
         self._expire.stop()
-
         if self._done is not None:
             self._done = None
+            self._ease_progress()
             self.update()
 
-    # -- Painting helpers -------------------------------------------------------
+    # -- Show / hide with motion ---------------------------------------------------
+
+    def pop_in(self) -> None:
+        """Show with a springy fade-and-rise (or just show, with animations off)."""
+        self._exiting = False
+        if not theme.animations:
+            self._stop("_appear")
+            self._appear = 1.0
+            if not self.isVisible():
+                self.show()
+            self.update()
+            return
+
+        if not self.isVisible():
+            self._appear = 0.0
+            self._shown_progress = self._target_progress()
+            self.show()
+        self._tween("_appear", self._appear, 1.0, 460, QEasingCurve.Type.OutBack)
+
+    def pop_out(self) -> None:
+        """Fade and sink away, then hide."""
+        if not self.isVisible() or self._exiting:
+            return
+        if not theme.animations:
+            self.hide()
+            return
+        self._exiting = True
+        self._tween("_appear", self._appear, 0.0, 220, QEasingCurve.Type.InCubic)
+
+    def _appear_finished(self) -> None:
+        if self._exiting:
+            self._exiting = False
+            self.hide()
+        elif self.isVisible() and theme.animations:
+            self._tween("_sheen", 0.0, 1.0, 900, QEasingCurve.Type.InOutSine)
+
+    def showEvent(self, e) -> None:
+        super().showEvent(e)
+        self._shown_progress = self._target_progress()
+        self._sync_clock()
+
+    def hideEvent(self, e) -> None:
+        super().hideEvent(e)
+        self._exiting = False
+        self._stop("_appear")
+        self._clock.stop()
+
+    # -- Animation plumbing ----------------------------------------------------------
+
+    def _tween(self, attr: str, start: float, end: float, ms: int, curve: QEasingCurve.Type) -> None:
+        if not theme.animations:
+            self._stop(attr)
+            setattr(self, attr, end if attr != "_sheen" else 0.0)
+            if attr == "_appear":
+                self._appear_finished()
+            self.update()
+            return
+
+        anim = self._anims.get(attr)
+        if anim is None:
+            anim = QVariantAnimation(self)
+            anim.valueChanged.connect(lambda v, a=attr: self._set(a, v))
+            if attr == "_appear":
+                anim.finished.connect(self._appear_finished)
+            self._anims[attr] = anim
+
+        anim.stop()
+        anim.setStartValue(float(start))
+        anim.setEndValue(float(end))
+        anim.setDuration(max(1, ms))
+        anim.setEasingCurve(curve)
+        anim.start()
+
+    def _stop(self, attr: str) -> None:
+        anim = self._anims.get(attr)
+        if anim is not None:
+            anim.stop()
+
+    def _set(self, attr: str, value) -> None:
+        setattr(self, attr, float(value))
+        self.update()
+
+    def _target_progress(self) -> float:
+        return 1.0 if self._done is not None else self._progress
+
+    def _ease_progress(self) -> None:
+        target = self._target_progress()
+        # A stopwatch wraps from 100% back to 0%: jump instead of sweeping backwards.
+        if not self.isVisible() or not theme.animations or target < self._shown_progress - 0.5:
+            self._stop("_shown_progress")
+            self._shown_progress = target
+            return
+        if abs(target - self._shown_progress) > 1e-4:
+            self._tween("_shown_progress", self._shown_progress, target, 600, QEasingCurve.Type.OutCubic)
+
+    def _sync_clock(self) -> None:
+        if self.isVisible() and theme.animations:
+            if not self._clock.isActive():
+                self._clock.start()
+        else:
+            self._clock.stop()
+
+    def _on_clock(self) -> None:
+        now = time.monotonic()
+        speed = 1.9 if self._done is not None else 1.0
+        self._phase += min(0.2, now - self._t) * speed
+        self._t = now
+        self.update()
+
+    def _on_theme(self) -> None:
+        self._head = None
+        self._sync_clock()
+        self.update()
+
+    # -- Hover ------------------------------------------------------------------------
+
+    def enterEvent(self, e) -> None:
+        super().enterEvent(e)
+        self._tween("_hover", self._hover, 1.0, 180, QEasingCurve.Type.OutCubic)
+
+    def leaveEvent(self, e) -> None:
+        super().leaveEvent(e)
+        self._tween("_hover", self._hover, 0.0, 260, QEasingCurve.Type.OutCubic)
+
+    # -- Painting helpers ---------------------------------------------------------------
 
     def _head_pixmap(self) -> QPixmap:
-        dpr = self.devicePixelRatioF() * SCALE
+        dpr = self.devicePixelRatioF()
 
-        if (
-            self._head is not None
-            and abs(self._head.devicePixelRatio() - dpr) < 1e-6
-        ):
+        if self._head is not None and abs(self._head.devicePixelRatio() - dpr) < 1e-6:
             return self._head
 
         size = max(1, int(AV_R * 2 * dpr))
@@ -166,31 +343,16 @@ class MiniTimer(QWidget):
         out.fill(Qt.GlobalColor.transparent)
 
         if not self._source.isNull():
-            crop = self._source.copy(
-                0,
-                0,
-                self._source.width(),
-                max(1, int(self._source.height() * 0.42)),
-            )
-
+            crop = self._source.copy(0, 0, self._source.width(), max(1, int(self._source.height() * 0.42)))
             pix = crop.scaled(
                 size,
                 size,
                 Qt.AspectRatioMode.KeepAspectRatioByExpanding,
                 Qt.TransformationMode.SmoothTransformation,
             )
-
             p = QPainter(out)
             p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-            p.drawPixmap(
-                0,
-                0,
-                pix,
-                (pix.width() - size) // 2,
-                max(0, (pix.height() - size) // 5),
-                size,
-                size,
-            )
+            p.drawPixmap(0, 0, pix, (pix.width() - size) // 2, max(0, (pix.height() - size) // 5), size, size)
             p.end()
 
         out.setDevicePixelRatio(dpr)
@@ -198,470 +360,357 @@ class MiniTimer(QWidget):
         return out
 
     @staticmethod
-    def _glow_stroke(
-        p: QPainter,
-        path: QPainterPath,
-        color: QColor,
-        width: float,
-        strength: float = 1.0,
-    ) -> None:
-        """Draw a neon edge with a soft outer glow."""
-
+    def _glow_stroke(p: QPainter, path: QPainterPath, color: QColor, width: float, strength: float = 1.0) -> None:
+        """A crisp line with a soft halo."""
         p.setBrush(Qt.BrushStyle.NoBrush)
 
-        for w, a in (
-            (width + 7, 0.05),
-            (width + 4.5, 0.09),
-            (width + 2, 0.16),
-        ):
-            c = QColor(color)
-            c.setAlphaF(a * strength)
+        for w, a in ((width + 4, 0.05), (width + 2, 0.10)):
             p.setPen(
-                QPen(
-                    c,
-                    w,
-                    Qt.PenStyle.SolidLine,
-                    Qt.PenCapStyle.RoundCap,
-                    Qt.PenJoinStyle.RoundJoin,
-                )
+                QPen(_alpha(color, a * strength), w, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
             )
             p.drawPath(path)
 
-        p.setPen(
-            QPen(
-                color,
-                width,
-                Qt.PenStyle.SolidLine,
-                Qt.PenCapStyle.RoundCap,
-                Qt.PenJoinStyle.RoundJoin,
-            )
-        )
+        p.setPen(QPen(color, width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
         p.drawPath(path)
 
     @staticmethod
-    def _glow_text(
+    def _swap_text(
         p: QPainter,
         x: float,
-        base: float,
-        text: str,
+        y: float,
+        old: str,
+        new: str,
+        f: float,
         font: QFont,
         color: QColor,
-        glow: bool,
-        glow_color: QColor | None = None,
+        right: bool = False,
     ) -> None:
-        path = QPainterPath()
-        path.addText(x, base, font, text)
+        """Draw `new`, or cross-fade from `old` with a small vertical slide while f < 1."""
+        p.setFont(font)
 
-        if glow:
-            for w, a in ((7, 0.07), (4, 0.12)):
-                c = QColor(glow_color or color)
-                c.setAlphaF(a)
-                p.setPen(
-                    QPen(
-                        c,
-                        w,
-                        Qt.PenStyle.SolidLine,
-                        Qt.PenCapStyle.RoundCap,
-                        Qt.PenJoinStyle.RoundJoin,
-                    )
-                )
-                p.setBrush(Qt.BrushStyle.NoBrush)
-                p.drawPath(path)
+        def one(text: str, alpha: float, dy: float) -> None:
+            if alpha <= 0.01 or not text:
+                return
+            p.setPen(_alpha(color, color.alphaF() * alpha))
+            px = x - _width(font, text) if right else x
+            p.drawText(QPointF(px, y + dy), text)
 
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(color)
-        p.drawPath(path)
+        if f >= 1.0 or not old:
+            one(new, 1.0, 0.0)
+        else:
+            one(old, 1.0 - f, -4.0 * f)
+            one(new, f, 4.0 * (1.0 - f))
 
-    # -- Main painting ----------------------------------------------------------
+    # -- Main painting ---------------------------------------------------------------------
 
     def paintEvent(self, _event) -> None:
+        anim = theme.animations
+        t = self._t
+        breath = 0.5 + 0.5 * math.sin(t * 2 * math.pi / 3.4) if anim else 0.5
+
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
-        p.scale(SCALE, SCALE)
+
+        # Entrance / exit / bump transform around the card centre.
+        card = QRectF(M, M, CW, CH)
+        centre = card.center()
+        appear = self._appear
+        scale = (0.88 + 0.12 * appear) * (0.94 + 0.06 * self._bump) * (1.0 + 0.012 * self._hover)
+        p.setOpacity(max(0.0, min(1.0, appear)))
+        p.translate(centre.x(), centre.y() + (1.0 - appear) * 14.0 - 1.2 * self._hover)
+        p.scale(scale, scale)
+        p.translate(-centre.x(), -centre.y())
 
         accent = theme.c("accent")
-        accent_hi = theme.c("accent_hi")
-        dark = theme.c("bg").darker(150)
-        muted = theme.c("muted")
-        text = theme.c("text")
-
         done = self._done is not None
 
-        self._paint_frame(p, accent, dark, done)
-        self._paint_avatar(p, accent, dark, done)
+        self._paint_card(p, card, accent, done, breath)
+        self._paint_medallion(p, accent, done, breath, t)
+        self._paint_bars(p, accent, done)
+        self._paint_text(p, accent, done, breath, t)
+        self._paint_sheen(p, card)
 
-        if done:
-            title, detail = self._done
-
-            self._paint_caption(p, accent, self._caption)
-
-            font = _font(32, QFont.Weight.Black, 0.8)
-            room = DIV_X - LEFT - 10
-
-            while _width(font, title) > room and font.pixelSize() > 14:
-                font.setPixelSize(font.pixelSize() - 1)
-
-            self._glow_text(p, LEFT, 77, title, font, accent, True)
-
-            self._paint_task_row(
-                p, accent, accent_hi, detail, dim=False
-            )
-            self._paint_bar(p, accent, accent_hi, 1.0, "100%")
-            return
-
-        self._paint_caption(p, accent, self._caption)
-        self._paint_time(p, accent, text)
-        self._paint_task_row(
-            p, accent, accent_hi, self._task, dim=not self._task
-        )
-        self._paint_bar(
-            p,
-            accent,
-            accent_hi,
-            self._progress,
-            f"{round(max(0.0, min(1.0, self._progress)) * 100)}%",
-        )
-
-    def _paint_frame(
-        self,
-        p: QPainter,
-        accent: QColor,
-        dark: QColor,
-        done: bool,
-    ) -> None:
-        edge = QColor(accent)
-        edge.setAlphaF(0.95 if done else 0.7)
-
-        # Arrow-shaped plate behind the medallion.
-        plate = QPolygonF([
-            QPointF(6, H / 2),
-            QPointF(38, 24),
-            QPointF(124, 24),
-            QPointF(124, H - 24),
-            QPointF(38, H - 24),
-        ])
-
-        pp = QPainterPath()
-        pp.addPolygon(plate)
-        pp.closeSubpath()
-
+    def _paint_card(self, p: QPainter, card: QRectF, accent: QColor, done: bool, breath: float) -> None:
+        # Soft layered shadow.
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(dark.lighter(125))
-        p.drawPath(pp)
+        for i in range(7):
+            grow = i * 1.6
+            p.setBrush(QColor(0, 0, 0, round(20 * (1 - i / 7))))
+            p.drawRoundedRect(card.adjusted(-grow, -grow + 3, grow, grow + 3), RADIUS + grow, RADIUS + grow)
 
-        lp = QPainterPath(QPointF(38, H - 24))
-        lp.lineTo(6, H / 2)
-        lp.lineTo(38, 24)
-        self._glow_stroke(p, lp, edge, 2.0)
-
-        # Main body.
         body = QPainterPath()
-        body.moveTo(100, 16)
-        body.lineTo(W - 18, 16)
-        body.lineTo(W - 6, 34)
-        body.lineTo(W - 6, H - 34)
-        body.lineTo(W - 26, H - 12)
-        body.lineTo(120, H - 12)
-        body.lineTo(100, H - 16)
-        body.closeSubpath()
+        body.addRoundedRect(card, RADIUS, RADIUS)
 
-        grad = QLinearGradient(0, 0, W, H)
-        grad.setColorAt(0.0, dark.lighter(135))
-        grad.setColorAt(0.55, dark)
-        grad.setColorAt(1.0, dark.lighter(120))
-
-        p.setPen(Qt.PenStyle.NoPen)
+        # Glass body: panel on top fading to the window colour; see-through when transparency is on.
+        a = 0.80 if theme.transparent else 0.96
+        top = _alpha(theme.solid("panel").lighter(112), a)
+        bottom = _alpha(theme.solid("bg").darker(108), a)
+        grad = QLinearGradient(card.topLeft(), card.bottomLeft())
+        grad.setColorAt(0.0, top)
+        grad.setColorAt(1.0, bottom)
         p.setBrush(grad)
         p.drawPath(body)
 
-        self._glow_stroke(
-            p,
-            body,
-            theme.alpha("accent", 0.45 if not done else 0.85),
-            1.2,
-            0.8,
-        )
-
-        # Inner hairline frame.
-        inner = QPainterPath()
-        inner.moveTo(124, 22)
-        inner.lineTo(W - 22, 22)
-        inner.lineTo(W - 13, 33)
-        inner.lineTo(W - 13, H - 38)
-        inner.lineTo(W - 31, H - 19)
-        inner.lineTo(124, H - 19)
-
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.setPen(QPen(theme.alpha("accent", 0.14), 1))
-        p.drawPath(inner)
-
-        # Decorative slanted stripes.
-        p.setPen(Qt.PenStyle.NoPen)
-
-        for i, a in enumerate((1.0, 0.75, 0.4, 0.16)):
-            x = W - 96 + i * 13
-            stripe = QPolygonF([
-                QPointF(x + 5, 20),
-                QPointF(x + 15, 20),
-                QPointF(x + 10, 28),
-                QPointF(x, 28),
-            ])
-            p.setBrush(theme.alpha("accent_hi", a))
-            p.drawPolygon(stripe)
-
-    def _paint_avatar(
-        self,
-        p: QPainter,
-        accent: QColor,
-        dark: QColor,
-        done: bool,
-    ) -> None:
-        p.setPen(QPen(theme.alpha("accent", 0.35), 1))
-        p.setBrush(dark.darker(130))
-        p.drawEllipse(AV_C, RING_R + 6, RING_R + 6)
-
-        circle = QPainterPath()
-        circle.addEllipse(AV_C, AV_R, AV_R)
-        p.fillPath(circle, theme.c("panel2"))
-
+        # Accent bloom behind the medallion.
         p.save()
-        p.setClipPath(circle)
-        p.drawPixmap(
-            QPointF(AV_C.x() - AV_R, AV_C.y() - AV_R),
-            self._head_pixmap(),
-        )
+        p.setClipPath(body)
+        bloom = QRadialGradient(QPointF(AV_CX, AV_CY), 62)
+        bloom.setColorAt(0.0, _alpha(accent, 0.10 + 0.03 * breath + (0.06 if done else 0.0)))
+        bloom.setColorAt(1.0, _alpha(accent, 0.0))
+        p.setBrush(bloom)
+        p.drawRect(card)
+        # Faint top highlight.
+        hi = QLinearGradient(card.topLeft(), QPointF(card.left(), card.top() + 22))
+        hi.setColorAt(0.0, QColor(255, 255, 255, 20))
+        hi.setColorAt(1.0, QColor(255, 255, 255, 0))
+        p.setBrush(hi)
+        p.drawRect(QRectF(card.left(), card.top(), card.width(), 22))
         p.restore()
 
-        p.setPen(QPen(theme.alpha("accent", 0.5), 1.2))
+        # Hairline border that leans toward the accent.
+        edge = QLinearGradient(card.topLeft(), card.bottomRight())
+        strength = (0.9 if done else 0.5) + 0.25 * self._hover
+        edge.setColorAt(0.0, _alpha(accent, min(1.0, strength + 0.1 * breath)))
+        edge.setColorAt(0.55, _alpha(theme.c("border"), 0.9))
+        edge.setColorAt(1.0, _alpha(accent, 0.25 + 0.2 * self._hover))
         p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawEllipse(AV_C, AV_R + 1.5, AV_R + 1.5)
+        p.setPen(QPen(edge, 1.1))
+        p.drawRoundedRect(card.adjusted(0.5, 0.5, -0.5, -0.5), RADIUS - 0.5, RADIUS - 0.5)
 
-        rect = QRectF(
-            AV_C.x() - RING_R,
-            AV_C.y() - RING_R,
-            RING_R * 2,
-            RING_R * 2,
-        )
+    def _paint_sheen(self, p: QPainter, card: QRectF) -> None:
+        s = self._sheen
+        if not (0.0 < s < 1.0):
+            return
+        p.save()
+        clip = QPainterPath()
+        clip.addRoundedRect(card, RADIUS, RADIUS)
+        p.setClipPath(clip)
 
-        arcs = (
-            ((0, 358),)
-            if done
-            else ((70, 62), (152, 20), (190, 80), (292, 56))
-        )
-
-        for start, span in arcs:
-            path = QPainterPath()
-            path.arcMoveTo(rect, start)
-            path.arcTo(rect, start, span)
-            self._glow_stroke(
-                p, path, accent, 3.2, 1.0 if done else 0.8
-            )
-
-        p.setPen(QPen(theme.alpha("accent", 0.22), 1))
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawEllipse(AV_C, RING_R - 5, RING_R - 5)
-
-    def _paint_caption(
-        self,
-        p: QPainter,
-        accent: QColor,
-        caption: str,
-    ) -> None:
-        """Bright, right-aligned session caption in the former motto column."""
-
-        x0 = DIV_X + 10
-        x1 = W - 24
-        width = x1 - x0
-
-        # Bright theme accent with a subtle glow.
-        color = QColor(accent)
-        color.setAlpha(255)
-
-        font = _font(16, QFont.Weight.Bold, 1.0)
-        shown = caption.upper().strip() or "FOCUS SESSION"
-
-        # Keep long captions within the right-hand column.
-        while _width(font, shown) > width and font.pixelSize() > 8:
-            font.setPixelSize(font.pixelSize() - 1)
-
-        shown = QFontMetricsF(font).elidedText(
-            shown,
-            Qt.TextElideMode.ElideRight,
-            width,
-        )
-
-        # Small accent rule above the caption.
-        p.setPen(QPen(theme.alpha("accent", 0.55), 1))
-        p.drawLine(
-            QPointF(x0 + 5, 43),
-            QPointF(x1, 43),
-        )
-
-        self._glow_text(
-            p,
-            x1 - _width(font, shown),
-            68,
-            shown,
-            font,
-            color,
-            True,
-            accent,
-        )
-
-    def _paint_time(
-        self,
-        p: QPainter,
-        accent: QColor,
-        text: QColor,
-    ) -> None:
-        head, sep, tail = self._time.rpartition(":")
-        room = DIV_X - LEFT - 14
-
-        # Slightly smaller timer.
-        font = _font(46, QFont.Weight.Black, 0.5)
-
-        while _width(font, self._time) > room and font.pixelSize() > 16:
-            font.setPixelSize(font.pixelSize() - 1)
-
-        x = float(LEFT)
-
-        if sep:
-            self._glow_text(p, x, 76, head, font, text, False)
-            x += _width(font, head)
-
-            self._glow_text(p, x, 76, ":", font, accent, True)
-            x += _width(font, ":")
-
-        whitish = QColor(accent)
-        whitish = QColor(
-            *(
-                round(c + (255 - c) * 0.55)
-                for c in (
-                    whitish.red(),
-                    whitish.green(),
-                    whitish.blue(),
-                )
-            )
-        )
-
-        self._glow_text(
-            p, x, 76, tail, font, whitish, True, accent
-        )
-
-    def _paint_task_row(
-        self,
-        p: QPainter,
-        accent: QColor,
-        accent_hi: QColor,
-        label: str,
-        dim: bool,
-    ) -> None:
-        dot = QPointF(LEFT + 6, 99)
-        color = theme.alpha("accent", 0.35) if dim else accent
-
-        for r, a in ((9, 0.07), (7.5, 0.12)):
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(theme.alpha("accent", a if not dim else 0))
-            p.drawEllipse(dot, r, r)
-
-        p.setBrush(color)
-        p.drawEllipse(dot, 5.5, 5.5)
-
-        # Larger focused-task title.
-        font = _font(20, QFont.Weight.DemiBold, 0.2)
-        shown = label or "No task selected"
-        room = DIV_X - (LEFT + 22) - 10
-
-        while _width(font, shown) > room and font.pixelSize() > 11:
-            font.setPixelSize(font.pixelSize() - 1)
-
-        shown = QFontMetricsF(font).elidedText(
-            shown,
-            Qt.TextElideMode.ElideRight,
-            room,
-        )
-
-        mint = QColor(accent_hi)
-        mint = QColor.fromHslF(
-            mint.hslHueF(),
-            min(1.0, mint.hslSaturationF()),
-            min(0.9, mint.lightnessF() + 0.18),
-        )
-
-        p.setFont(font)
-        p.setPen(
-            theme.alpha("muted", 0.8) if dim else mint
-        )
-        p.drawText(QPointF(LEFT + 22, 104), shown)
-
-    def _paint_bar(
-        self,
-        p: QPainter,
-        accent: QColor,
-        accent_hi: QColor,
-        progress: float,
-        label: str,
-    ) -> None:
-        x0, x1, y, h = LEFT - 2, W - 70, 115.0, 7.0
-        track = QRectF(x0, y, x1 - x0, h)
-
+        x = card.left() - 70 + (card.width() + 140) * s
+        band = QPolygonF([
+            QPointF(x, card.top()),
+            QPointF(x + 46, card.top()),
+            QPointF(x + 22, card.bottom()),
+            QPointF(x - 24, card.bottom()),
+        ])
+        g = QLinearGradient(x - 24, 0, x + 46, 0)
+        g.setColorAt(0.0, QColor(255, 255, 255, 0))
+        g.setColorAt(0.5, QColor(255, 255, 255, 46))
+        g.setColorAt(1.0, QColor(255, 255, 255, 0))
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(theme.alpha("muted", 0.16))
-        p.drawRoundedRect(track, h / 2, h / 2)
+        p.setBrush(g)
+        p.drawPolygon(band)
+        p.restore()
 
-        frac = max(0.0, min(1.0, progress))
+    def _paint_medallion(self, p: QPainter, accent: QColor, done: bool, breath: float, t: float) -> None:
+        c = QPointF(AV_CX, AV_CY)
+        anim = theme.animations
 
-        if frac > 0:
-            fill = QRectF(x0, y, max(h, track.width() * frac), h)
+        # Ripples travelling outwards once a session has ended.
+        if done and anim:
+            for k in range(3):
+                ph = ((t - self._done_t0) * 0.55 + k / 3) % 1.0
+                r = RING_R + 2 + ph * 15
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.setPen(QPen(_alpha(accent, 0.38 * (1 - ph) ** 1.5), 1.4))
+                p.drawEllipse(c, r, r)
 
-            p.setBrush(theme.alpha("accent", 0.14))
-            p.drawRoundedRect(fill.adjusted(-2, -3, 2, 3), h, h)
+        # Ring track + progress.
+        rect = QRectF(c.x() - RING_R, c.y() - RING_R, RING_R * 2, RING_R * 2)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(_alpha(theme.c("muted"), 0.22), 3.0))
+        p.drawEllipse(c, RING_R, RING_R)
 
-            g = QLinearGradient(fill.left(), 0, fill.right(), 0)
-            g.setColorAt(0.0, theme.c("accent_lo"))
-            g.setColorAt(1.0, accent_hi)
+        frac = max(0.0, min(1.0, self._shown_progress))
+        glow = 0.3 + 0.1 * breath if anim else 0.3  # keep the halo faint so the ring stays crisp
+        if done:
+            glow = 0.45
 
+        if frac > 0.002:
+            path = QPainterPath()
+            if frac >= 0.998:
+                path.addEllipse(rect)
+            else:
+                path.arcMoveTo(rect, 90)
+                path.arcTo(rect, 90, -360.0 * frac)
+            self._glow_stroke(p, path, accent, 3.0, glow)
+
+            if frac < 0.998:  # glowing head on the leading edge
+                ang = 2 * math.pi * frac
+                head = QPointF(c.x() + RING_R * math.sin(ang), c.y() - RING_R * math.cos(ang))
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(_lighten(accent, 0.6))
+                p.drawEllipse(head, 2.0, 2.0)
+
+        # Medallion.
+        r = AV_R * (1.0 + 0.018 * breath if anim else 1.0)
+        disc = QPainterPath()
+        disc.addEllipse(c, r, r)
+        p.fillPath(disc, theme.solid("panel2"))
+
+        p.save()
+        p.setClipPath(disc)
+        p.drawPixmap(QPointF(c.x() - AV_R, c.y() - AV_R), self._head_pixmap())
+        p.restore()
+
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(_alpha(accent, 0.45), 1.0))
+        p.drawEllipse(c, r + 0.5, r + 0.5)
+
+        if done:
+            self._paint_check(p, accent, QPointF(c.x() + 14.5, c.y() + 14.5))
+
+    def _paint_check(self, p: QPainter, accent: QColor, pos: QPointF) -> None:
+        s = 0.55 + 0.45 * max(0.0, min(1.3, self._bump))
+        p.save()
+        p.translate(pos)
+        p.scale(s, s)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(theme.solid("bg"))
+        p.drawEllipse(QPointF(0, 0), 8.6, 8.6)
+        p.setBrush(accent)
+        p.drawEllipse(QPointF(0, 0), 7.2, 7.2)
+        tick = QPainterPath(QPointF(-3.4, 0.2))
+        tick.lineTo(-1.0, 2.7)
+        tick.lineTo(3.5, -2.5)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(theme.c("on_accent"), 1.9, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        p.drawPath(tick)
+        p.restore()
+
+    def _paint_bars(self, p: QPainter, accent: QColor, done: bool) -> None:
+        """Mirrored bars that bounce up and down from a centre line, like a level meter."""
+        anim = theme.animations
+        amp = 1.0 if done else 0.78
+        top = _lighten(accent, 0.45)
+        low = theme.c("accent_lo")
+        ph = self._phase
+
+        for i in range(BARS):
+            if anim:
+                # Two out-of-step sines per bar give a lively but smooth, non-repeating-looking bounce.
+                a = math.sin(ph * (3.1 + i * 0.47) + i * 1.7)
+                b = math.sin(ph * (5.3 - i * 0.31) + i * 0.9)
+                lvl = 0.5 + 0.5 * (0.62 * a + 0.38 * b)
+            else:
+                lvl = (0.35, 0.6, 0.85, 1.0, 0.8, 0.55, 0.4)[i % 7]
+            h = 5.0 + (BARS_H - 5.0) * lvl * amp
+            x = BARS_X0 + i * (BAR_W + BAR_GAP)
+            rect = QRectF(x, BARS_CY - h / 2, BAR_W, h)
+
+            p.setPen(Qt.PenStyle.NoPen)
+            g = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+            g.setColorAt(0.0, top)
+            g.setColorAt(0.5, accent)
+            g.setColorAt(1.0, low)
             p.setBrush(g)
-            p.drawRoundedRect(fill, h / 2, h / 2)
+            p.drawRoundedRect(rect, BAR_W / 2, BAR_W / 2)
 
-            p.save()
-            clip = QPainterPath()
-            clip.addRoundedRect(fill, h / 2, h / 2)
-            p.setClipPath(clip)
-            p.setPen(QPen(QColor(0, 0, 0, 38), 1.4))
+    def _paint_text(self, p: QPainter, accent: QColor, done: bool, breath: float, t: float) -> None:
+        anim = theme.animations
+        room = TEXT_ROOM
+        text = theme.c("text")
+        muted = theme.c("muted")
 
-            sx = fill.left() - h
-            while sx < fill.right():
-                p.drawLine(
-                    QPointF(sx, fill.bottom()),
-                    QPointF(sx + h, fill.top()),
-                )
-                sx += 6
+        # Row 1: status dot + caption (left), percentage (right).
+        cap_font = _font(9, QFont.Weight.Bold, 1.1)
+        pulse = (0.45 + 0.55 * (0.5 + 0.5 * math.sin(t * 2 * math.pi / 1.6))) if (anim and not done) else 1.0
+        dot = QPointF(TEXT_X + 3.0, M + 16.5)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(_alpha(accent, 0.22 * pulse))
+        p.drawEllipse(dot, 4.6 * (0.8 + 0.4 * pulse), 4.6 * (0.8 + 0.4 * pulse))
+        p.setBrush(accent)
+        p.drawEllipse(dot, 2.4, 2.4)
 
-            p.restore()
+        cap_new = "DONE" if done else (self._caption.upper().strip() or "FOCUS SESSION")
+        cap_old = self._cap_from.upper().strip()
+        if done:
+            cap_old = ""
+        cap_font_fit = QFont(cap_font)
+        while _width(cap_font_fit, cap_new) > room - 12 and cap_font_fit.pixelSize() > 7:
+            cap_font_fit.setPixelSize(cap_font_fit.pixelSize() - 1)
+        self._swap_text(p, TEXT_X + 12.0, M + 20.0, cap_old, cap_new, self._cap_fade, cap_font_fit, _lighten(accent, 0.25))
 
-        font = _font(20, QFont.Weight.Bold, 0.8)
+        if not done:
+            pct = f"{round(max(0.0, min(1.0, self._progress)) * 100)}%"
+            p.setFont(_font(10, QFont.Weight.DemiBold, 0.3))
+            p.setPen(_alpha(muted, 0.95))
+            p.drawText(QPointF(TEXT_R - _width(p.font(), pct), M + 58.5), pct)
+
+        # Row 2: the time, or the "time's up" headline.
+        if done:
+            title, detail = self._done
+            font = _font(20, QFont.Weight.Black, 0.2)
+            while _width(font, title) > room and font.pixelSize() > 12:
+                font.setPixelSize(font.pixelSize() - 1)
+            p.setFont(font)
+            p.setPen(_lighten(accent, 0.2))
+            p.drawText(QPointF(TEXT_X, M + 43.0), title)
+            sub = detail
+        else:
+            self._paint_time(p, accent, text, t)
+            sub = self._task
+
+        # Row 3: the focused task (or the finish detail).
+        font = _font(11, QFont.Weight.Medium, 0.1)
+        shown = sub or "No task selected"
+        # The task row sits below the bars, so it only has to leave space for the percentage.
+        row_room = (TEXT_R - TEXT_X) - (0 if done else 42)
+        shown = QFontMetricsF(font).elidedText(shown, Qt.TextElideMode.ElideRight, row_room)
         p.setFont(font)
-        pc = QColor(accent)
-        pc = QColor(
-            *(
-                round(c + (255 - c) * 0.65)
-                for c in (pc.red(), pc.green(), pc.blue())
-            )
-        )
-        pc.setAlpha(235)
-        p.setPen(pc)
+        p.setPen(_alpha(text, 0.78) if sub else _alpha(muted, 0.7))
+        p.drawText(QPointF(TEXT_X, M + 58.5), shown)
 
-        p.drawText(
-            QRectF(x1 + 8, y - 6, W - 6 - x1 - 8, h + 12),
-            Qt.AlignmentFlag.AlignVCenter
-            | Qt.AlignmentFlag.AlignRight,
-            label,
-        )
+    def _paint_time(self, p: QPainter, accent: QColor, text: QColor, t: float) -> None:
+        anim = theme.animations
+        room = TEXT_ROOM
+        font = _font(25, QFont.Weight.Bold, 0.0)
 
-    # -- Dragging ---------------------------------------------------------------
+        # Fixed-width digit cells keep the clock from jiggling and make per-digit rolling possible.
+        def cells(f: QFont) -> tuple[float, float]:
+            return max(_width(f, str(d)) for d in range(10)), _width(f, ":")
+
+        digit_w, colon_w = cells(font)
+        total = lambda s: sum(colon_w if ch == ":" else digit_w for ch in s)
+
+        while total(self._time) > room and font.pixelSize() > 14:
+            font.setPixelSize(font.pixelSize() - 1)
+            digit_w, colon_w = cells(font)
+
+        base_y = M + 43.0
+        last_colon = self._time.rfind(":")
+        blink = (0.4 + 0.6 * (0.5 + 0.5 * math.cos(t * 2 * math.pi))) if anim else 1.0
+
+        old = self._roll_from if self._roll < 1.0 and len(self._roll_from) == len(self._time) else ""
+        rise = 11.0
+
+        p.setFont(font)
+        x = TEXT_X
+        for i, ch in enumerate(self._time):
+            w = colon_w if ch == ":" else digit_w
+            if ch == ":":
+                col = _alpha(accent, blink)
+            elif last_colon >= 0 and i > last_colon:
+                col = _lighten(accent, 0.55)  # seconds pick up the accent
+            else:
+                col = text
+
+            cx = x + (w - _width(font, ch)) / 2
+
+            if old and old[i] != ch:
+                r = self._roll
+                p.setPen(_alpha(col, 1.0 - r))
+                p.drawText(QPointF(cx, base_y - r * rise), old[i])
+                p.setPen(_alpha(col, r))
+                p.drawText(QPointF(cx, base_y + (1.0 - r) * rise), ch)
+            else:
+                p.setPen(col)
+                p.drawText(QPointF(cx, base_y), ch)
+            x += w
+
+    # -- Dragging ------------------------------------------------------------------------------
 
     def mousePressEvent(self, event) -> None:
         if event.button() != Qt.MouseButton.LeftButton:
@@ -673,19 +722,11 @@ class MiniTimer(QWidget):
         if handle is not None and handle.startSystemMove():
             return
 
-        self._drag = (
-            event.globalPosition().toPoint()
-            - self.frameGeometry().topLeft()
-        )
+        self._drag = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
 
     def mouseMoveEvent(self, event) -> None:
-        if (
-            self._drag is not None
-            and event.buttons() & Qt.MouseButton.LeftButton
-        ):
-            self.move(
-                event.globalPosition().toPoint() - self._drag
-            )
+        if self._drag is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            self.move(event.globalPosition().toPoint() - self._drag)
 
     def mouseReleaseEvent(self, _event) -> None:
         self._drag = None

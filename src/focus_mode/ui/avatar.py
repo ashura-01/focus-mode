@@ -6,7 +6,7 @@ import math
 import time
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
-from PySide6.QtGui import QGuiApplication, QColor, QLinearGradient, QPainter, QPainterPath, QPixmap
+from PySide6.QtGui import QFont, QFontMetricsF, QGuiApplication, QColor, QLinearGradient, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import QSizePolicy, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from focus_mode import paths
@@ -141,16 +141,46 @@ class SpeechBubble(QWidget):
         self.setMinimumWidth(120)
         self.setMaximumWidth(width)
         self.setFixedWidth(width)
+        self._sizes: tuple[int, int] | None = None
         theme.changed.connect(self._recolor)
         self._recolor()
 
+    def _fit_px(self, text: str, px: int, weight: QFont.Weight) -> int:
+        """Largest font size (<= px) at which the longest word still fits the bubble's text width.
+
+        QLabel wraps at spaces only, so a long word in a narrow bubble would be cut off at the edge.
+        """
+        m = self.layout().contentsMargins()
+        room = max(40, self.width() - m.left() - m.right()) - 2
+        words = text.split() or [""]
+        font = QFont(self.font())
+        font.setWeight(weight)
+        while px > 9:
+            font.setPixelSize(px)
+            metrics = QFontMetricsF(font)
+            if max(metrics.horizontalAdvance(w) for w in words) <= room:
+                break
+            px -= 1
+        return px
+
     def _recolor(self) -> None:
+        self._apply_fonts(force=True)
+        self.update()
+
+    def _apply_fonts(self, force: bool = False) -> None:
+        big = self._fit_px(self.head.text(), round(22 * self._scale), QFont.Weight.DemiBold)
+        small = self._fit_px(self.body.text(), round(19 * self._scale), QFont.Weight.Normal)
+        if not force and (big, small) == self._sizes:
+            return
+        self._sizes = (big, small)
         accent = theme.c("accent").name()
-        big, small = round(22 * self._scale), round(19 * self._scale)
         self.head.setStyleSheet(f"font-size: {big}px; font-weight: 600; color: {accent};")
         self.body.setStyleSheet(f"font-size: {small}px;")
         self.mark.setStyleSheet(f"font-size: {big}px; color: {accent};")
-        self.update()
+        # Apply the new fonts now: sizing the bubble below must not use stale, pre-polish metrics.
+        for lab in (self.head, self.body, self.mark):
+            lab.ensurePolished()
+            lab.updateGeometry()
 
     def set_scale(self, scale: float) -> None:
         """Shrink the bubble (text and width) together when the window gets narrow."""
@@ -166,6 +196,7 @@ class SpeechBubble(QWidget):
     def _sync_height(self) -> None:
         # Use the layout's real height-for-width calculation so wrapped custom
         # messages resize the bubble instead of being clipped during window resizes.
+        self._apply_fonts()
         layout = self.layout()
         # Activate after text/width changes so QLabel word-wrapping is reflected.
         layout.activate()

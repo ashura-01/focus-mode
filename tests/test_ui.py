@@ -189,3 +189,50 @@ def test_resizing_everywhere_and_close_button(app_env):
                 win.resize(rnd.randint(win.minimumWidth(), 1700), rnd.randint(440, 950))
                 pump(app, 0.01)
     assert win.close_btn.isVisible() and win.close_btn.x() > win.centralWidget().width() - 60
+
+
+def test_nord_theme_and_transparency(app_env):
+    from PySide6.QtCore import Qt
+
+    app, settings, svc, win = app_env
+    settings.set("appearance", "base", "nord")
+    settings.set("appearance", "accent", "#88c0d0")
+    pump(app, 0.05)
+    assert theme.base == "nord" and "#2e3440" in app.styleSheet()
+    assert theme.on_accent().name() != "#ffffff"  # light accent gets dark text
+
+    assert theme.c("bg").alpha() == 255
+    settings.set("appearance", "transparent", True)
+    pump(app, 0.1)
+    assert theme.transparent and win.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+    assert win.isVisible() and theme.c("panel").alpha() < 255 and theme.solid("panel").alpha() == 255
+    assert win.grab().toImage().pixelColor(2, 2).alpha() < 255
+    settings.set("appearance", "transparent", False)
+    pump(app, 0.1)
+    assert not win.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+
+def test_mini_timer_animates_in_and_out(app_env):
+    from focus_mode.ui.mini import MiniTimer
+
+    app, settings, svc, win = app_env
+    mini = MiniTimer()  # standalone: the window's own mini timer is managed by its settings
+    mini.update_state("24:59", "FOCUS SESSION", 0.1, "Task")
+    mini.pop_in()
+    assert mini.shown
+    pump(app, 0.7)
+    assert mini._appear == 1.0
+    mini.update_state("24:58", "FOCUS SESSION", 0.11, "Task")
+    mini.show_done("TIME'S UP!", "Focus session complete")
+    pump(app, 0.2)
+    assert mini.done and not mini.grab().isNull()
+    mini.pop_out()
+    assert not mini.shown
+    pump(app, 0.5)
+    assert not mini.isVisible()
+    settings.set("appearance", "animations", False)
+    mini.pop_in()
+    assert mini.isVisible() and mini._appear == 1.0
+    mini.pop_out()
+    assert not mini.isVisible()
+    settings.set("appearance", "animations", True)

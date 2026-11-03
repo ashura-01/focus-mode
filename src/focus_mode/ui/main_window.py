@@ -163,6 +163,9 @@ class MainWindow(QMainWindow):
         self._responsive_timer.setInterval(40)
         self._responsive_timer.timeout.connect(self._apply_responsive)
 
+        self._apply_transparency()
+        theme.changed.connect(self._apply_transparency)
+
         self.mini = MiniTimer()
         self.mini.clicked.connect(self._restore)
         self._mini_task = ""
@@ -176,6 +179,31 @@ class MainWindow(QMainWindow):
         svc.watch.tick.connect(self._sync_mini)
         svc.pomo.tick.connect(self._sync_title)
         svc.pomo.state_changed.connect(self._sync_title)
+
+    def _apply_transparency(self) -> None:
+        """Make the whole window see-through (or solid again) to match the Transparent window setting.
+
+        Qt only honours the translucent attribute when the native window is created, so a visible
+        window is hidden and re-shown once; its geometry and state are kept.
+        """
+        want = bool(theme.transparent)
+        if self.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground) == want:
+            return
+        was_visible = self.isVisible()
+        geo = self.saveGeometry()
+        if was_visible:
+            self.hide()
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, want)
+        if was_visible:
+            self.show()
+            self.restoreGeometry(geo)
+
+    def paintEvent(self, e) -> None:
+        # Window background: solid normally, translucent (theme alpha) when Transparent window is on.
+        p = QPainter(self)
+        p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+        p.fillRect(self.rect(), theme.c("bg"))
+        p.end()
 
     # -- navigation ---------------------------------------------------------
     @staticmethod
@@ -287,12 +315,13 @@ class MainWindow(QMainWindow):
             want = False
         if self.mini.done and bool(s.settings.get("alerts", "mini_timer")) and not self.isActiveWindow():
             want = True
-        if want and not self.mini.isVisible():
-            geo = QGuiApplication.primaryScreen().availableGeometry()
-            self.mini.move(geo.right() - self.mini.width() - 24, geo.top() + 24)
-            self.mini.show()
-        elif not want and self.mini.isVisible():
-            self.mini.hide()
+        if want and not self.mini.shown:
+            if not self.mini.isVisible():
+                geo = QGuiApplication.primaryScreen().availableGeometry()
+                self.mini.move(geo.right() - self.mini.width() - 12, geo.top() + 12)
+            self.mini.pop_in()
+        elif not want and self.mini.shown:
+            self.mini.pop_out()
 
     def _restore(self) -> None:
         self.mini.clear_done()

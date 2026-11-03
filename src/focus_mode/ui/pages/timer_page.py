@@ -93,10 +93,10 @@ class TimerPage(QWidget):
         self.meter.set_value(p.progress())
         if p.running:
             self.start_btn.setText("Pause")
-            self.start_btn.setIcon(icons.icon("pause", "#ffffff", 18))
+            self.start_btn.setIcon(icons.icon("pause", theme.c("on_accent"), 18))
         else:
             self.start_btn.setText("Resume" if p.state == "paused" else "Start")
-            self.start_btn.setIcon(icons.icon("play", "#ffffff", 18))
+            self.start_btn.setIcon(icons.icon("play", theme.c("on_accent"), 18))
         self.start_btn.setIconSize(QSize(18, 18))
         self.reset_btn.setEnabled(p.state != "idle")
 

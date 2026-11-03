@@ -435,7 +435,7 @@ class ChatPanel(QWidget):
 
     def _on_busy(self, busy: bool) -> None:
         self.thinking.setVisible(busy)
-        self.send_btn.setIcon(icons.icon("pause" if busy else "skip", "#ffffff", 20))
+        self.send_btn.setIcon(icons.icon("pause" if busy else "skip", theme.c("on_accent"), 20))
         self.send_btn.setToolTip("Stop" if busy else "Send (Enter)")
         self.clear_btn.setEnabled(not busy)
         if busy:

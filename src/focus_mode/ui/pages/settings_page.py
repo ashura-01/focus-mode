@@ -37,7 +37,7 @@ class SwatchRow(QWidget):
         self.current = current.lower()
         self._targets: list[tuple[QRectF, str | None]] = []
         self.setFixedHeight(40)
-        self.setMinimumWidth(8 * 40)
+        self.setMinimumWidth((len(ACCENTS) + 1) * 38 + 8)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def set_current(self, color: str) -> None:
@@ -45,7 +45,7 @@ class SwatchRow(QWidget):
         self.update()
 
     def sizeHint(self) -> QSize:
-        return QSize(8 * 40, 40)
+        return QSize((len(ACCENTS) + 1) * 38 + 8, 40)
 
     def paintEvent(self, _event) -> None:
         p = QPainter(self)
@@ -119,9 +119,11 @@ class SettingsPage(QWidget):
         self.swatches = SwatchRow(s.get("appearance", "accent"))
         box.addWidget(setting_row("Accent colour", "Used for the ring, buttons and highlights.", self.swatches, stack=True))
         self.base_tabs = Tabs([(k, v) for k, v in BASE_LABELS.items()], s.get("appearance", "base"))
-        box.addWidget(setting_row("Style", "Charcoal is soft, AMOLED is pure black, Midnight leans blue.", self.base_tabs, stack=True))
+        box.addWidget(setting_row("Style", "Charcoal is soft, AMOLED is pure black, Midnight leans blue, Nord is cool and arctic.", self.base_tabs, stack=True))
         self.anim_toggle = Toggle(s.get("appearance", "animations"))
         box.addWidget(setting_row("Animations", "Breathing knight, fades and smooth ring movement.", self.anim_toggle))
+        self.transparent_toggle = Toggle(s.get("appearance", "transparent"))
+        box.addWidget(setting_row("Transparent window", "See-through app background. Works best with a compositing desktop; some setups ignore it.", self.transparent_toggle))
         root.addWidget(card)
 
         # -- timer ------------------------------------------------------------
@@ -300,6 +302,7 @@ class SettingsPage(QWidget):
         self.swatches.picked.connect(lambda c: s.set("appearance", "accent", c))
         self.base_tabs.changed.connect(lambda k: s.set("appearance", "base", k))
         self.anim_toggle.toggled.connect(lambda v: s.set("appearance", "animations", v))
+        self.transparent_toggle.toggled.connect(lambda v: s.set("appearance", "transparent", v))
 
         self.focus_step.valueChanged.connect(lambda v: s.set("timer", "focus_min", v))
         self.short_step.valueChanged.connect(lambda v: s.set("timer", "short_min", v))
@@ -346,6 +349,7 @@ class SettingsPage(QWidget):
         self.base_tabs.set_current(s.get("appearance", "base"))
         for widget, (sec, key) in (
             (self.anim_toggle, ("appearance", "animations")),
+            (self.transparent_toggle, ("appearance", "transparent")),
             (self.auto_toggle, ("timer", "auto_start")),
             (self.sound_toggle, ("alerts", "sound")),
             (self.notify_toggle, ("alerts", "notifications")),

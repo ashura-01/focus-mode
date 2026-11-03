@@ -18,7 +18,7 @@ from PySide6.QtCore import QObject, Signal
 from focus_mode import paths
 
 DEFAULTS: dict[str, dict[str, Any]] = {
-    "appearance": {"accent": "#e0474f", "base": "charcoal", "animations": True},
+    "appearance": {"accent": "#e0474f", "base": "charcoal", "animations": True, "transparent": False},
     "timer": {
         "focus_min": 25,
         "short_min": 5,

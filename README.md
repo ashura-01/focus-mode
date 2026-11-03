@@ -1,6 +1,6 @@
 # Focus Mode
 
-A dark, distraction-fighting focus timer for Linux, with a knight guardian who tells you to put the phone down.
+A dark (or Nord, or see-through) distraction-fighting focus timer for Linux, with a knight guardian who tells you to put the phone down.
 Built with PySide6 (Qt). Data in SQLite, settings in TOML.
 
 <p align="center">
@@ -40,6 +40,9 @@ focus-mode --install-desktop   # optional: add to your applications menu
 
 Timer (Pomodoro) · Stopwatch (laps, saved to stats) · Tasks · Stats · Settings.
 Shortcuts: **Ctrl+1 … Ctrl+5**.
+
+Settings → Appearance: accent colour, style (Charcoal · AMOLED · Midnight · **Nord**), animations, and a **Transparent window** toggle (needs a compositing desktop).
+The floating mini timer is a compact animated glass card that follows the theme.
 
 ## Where things are stored
 

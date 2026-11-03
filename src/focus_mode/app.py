@@ -45,6 +45,7 @@ def apply_appearance(app: QApplication, settings: Settings) -> None:
         settings.get("appearance", "base"),
         settings.get("appearance", "accent"),
         settings.get("appearance", "animations"),
+        settings.get("appearance", "transparent"),
     )
     app.setPalette(theme.palette())
     app.setStyleSheet(theme.stylesheet())

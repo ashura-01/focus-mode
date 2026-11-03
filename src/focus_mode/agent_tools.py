@@ -32,6 +32,7 @@ SETTING_KEYS: dict[str, tuple[str, str, str]] = {
     "accent_color": ("appearance", "accent", "color"),
     "style": ("appearance", "base", "base"),
     "animations": ("appearance", "animations", "bool"),
+    "transparent": ("appearance", "transparent", "bool"),
     "sound": ("alerts", "sound", "bool"),
     "notifications": ("alerts", "notifications", "bool"),
     "mini_timer": ("alerts", "mini_timer", "bool"),

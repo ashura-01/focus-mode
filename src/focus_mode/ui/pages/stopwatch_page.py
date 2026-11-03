@@ -100,10 +100,10 @@ class StopwatchPage(QWidget):
         self.ring.set_progress((ms % 60000) / 60000.0)
         if w.running:
             self.start_btn.setText("Pause")
-            self.start_btn.setIcon(icons.icon("pause", "#ffffff", 18))
+            self.start_btn.setIcon(icons.icon("pause", theme.c("on_accent"), 18))
         else:
             self.start_btn.setText("Resume" if w.state == "paused" else "Start")
-            self.start_btn.setIcon(icons.icon("play", "#ffffff", 18))
+            self.start_btn.setIcon(icons.icon("play", theme.c("on_accent"), 18))
         self.start_btn.setIconSize(QSize(18, 18))
         self.reset_btn.setEnabled(w.state != "idle")
         self.ring.skip_button.setEnabled(w.state != "idle")

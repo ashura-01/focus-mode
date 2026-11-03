@@ -88,7 +88,7 @@ def button(text: str, variant: str = "", icon_name: str | None = None) -> QPushB
     if variant:
         btn.setProperty("variant", variant)
     if icon_name:
-        tint = "#ffffff" if variant == "primary" else theme.c("text")
+        tint = theme.c("on_accent") if variant == "primary" else theme.c("text")
         btn.setIcon(icons.icon(icon_name, tint, 18))
         btn.setIconSize(QSize(18, 18))
         btn.setProperty("icon_name", icon_name)
@@ -328,7 +328,7 @@ class RoundCheck(QAbstractButton):
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(theme.c("accent"))
             p.drawRoundedRect(rect, 6, 6)
-            p.drawPixmap(5, 5, icons.pixmap("check", "#ffffff", 12, stroke=3))
+            p.drawPixmap(5, 5, icons.pixmap("check", theme.c("on_accent"), 12, stroke=3))
         else:
             p.setPen(QPen(theme.c("muted"), 1.5))
             p.setBrush(Qt.BrushStyle.NoBrush)
